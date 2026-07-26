@@ -3,9 +3,8 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Quantum Arena — Institutional Crypto Trading Platform",
-  description:
-    "A modular, risk-first cryptocurrency leveraged trading platform: strategy research, backtesting, paper trading, and portfolio risk management.",
+  title: "Private Trading Assistant",
+  description: "خدمة تحليل وإشارات خاصة للمشتركين عبر تيليجرام.",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

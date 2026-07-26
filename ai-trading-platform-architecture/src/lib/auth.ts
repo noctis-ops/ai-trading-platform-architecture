@@ -1,21 +1,37 @@
 // ---------------------------------------------------------------------------
-// Authentication & session management.
+// Owner-console authentication.
 //
-// Design decisions (see /docs/DECISIONS.md):
-//  - Passwords hashed with bcryptjs (cost 12).
-//  - Sessions are opaque random tokens stored (hashed) server-side in the
-//    `sessions` table, delivered to the browser as an httpOnly cookie.
-//    This allows instant server-side revocation, unlike stateless JWTs.
+// Scope change from v1: there is no customer-facing web login any more.
+// Customers authenticate implicitly through Telegram (their `telegramId` is
+// their identity). This module now protects ONLY the owner/support console,
+// which is the highest-privilege surface in the product — it can extend
+// subscriptions, ban customers, and read revenue data.
+//
+// Design:
+//  - bcrypt cost 12 for staff passwords.
+//  - Opaque random session tokens; only the SHA-256 hash is persisted, so a
+//    database leak does not yield usable sessions, and revocation is instant.
+//  - Sessions are bound to a role so authorisation is a pure function of the
+//    session row, never of client input.
 // ---------------------------------------------------------------------------
 import bcrypt from "bcryptjs";
 import { cookies } from "next/headers";
-import { and, eq, gt } from "drizzle-orm";
-import { createHash, randomBytes } from "crypto";
+import { and, eq, gt, isNull } from "drizzle-orm";
+import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import { db } from "@/db";
-import { sessions, users } from "@/db/schema";
+import { adminSessions, adminUsers } from "@/db/schema";
 
-export const SESSION_COOKIE = "atp_session";
-const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
+export const SESSION_COOKIE = "qa_console";
+const SESSION_TTL_MS = 1000 * 60 * 60 * 8; // 8h — short, this is an admin surface
+
+export type AdminRole = "owner" | "support";
+
+export type AdminIdentity = {
+  id: string;
+  email: string;
+  name: string;
+  role: AdminRole;
+};
 
 export async function hashPassword(password: string): Promise<string> {
   return bcrypt.hash(password, 12);
@@ -29,18 +45,31 @@ function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-export async function createSession(userId: string) {
+/** Constant-time compare for any secret we check ourselves (e.g. webhook tokens). */
+export function safeEqual(a: string, b: string): boolean {
+  const ba = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ba.length !== bb.length) return false;
+  return timingSafeEqual(ba, bb);
+}
+
+export async function createAdminSession(adminUserId: string, ip?: string, userAgent?: string) {
   const token = randomBytes(32).toString("hex");
-  const tokenHash = hashToken(token);
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
 
-  await db.insert(sessions).values({ userId, tokenHash, expiresAt });
+  await db.insert(adminSessions).values({
+    adminUserId,
+    tokenHash: hashToken(token),
+    expiresAt,
+    ipAddress: ip,
+    userAgent,
+  });
 
   const cookieStore = await cookies();
   cookieStore.set(SESSION_COOKIE, token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
     path: "/",
     expires: expiresAt,
   });
@@ -48,54 +77,62 @@ export async function createSession(userId: string) {
   return token;
 }
 
-export async function destroySession() {
-  const cookieStore = await cookies();
-  const token = cookieStore.get(SESSION_COOKIE)?.value;
-  if (token) {
-    await db.delete(sessions).where(eq(sessions.tokenHash, hashToken(token)));
-  }
-  cookieStore.delete(SESSION_COOKIE);
-}
-
-export type CurrentUser = {
-  id: string;
-  email: string;
-  name: string;
-  role: string;
-};
-
-export async function getCurrentUser(): Promise<CurrentUser | null> {
+export async function getCurrentAdmin(): Promise<AdminIdentity | null> {
   const cookieStore = await cookies();
   const token = cookieStore.get(SESSION_COOKIE)?.value;
   if (!token) return null;
 
-  const tokenHash = hashToken(token);
   const rows = await db
     .select({
-      id: users.id,
-      email: users.email,
-      name: users.name,
-      role: users.role,
+      id: adminUsers.id,
+      email: adminUsers.email,
+      name: adminUsers.name,
+      role: adminUsers.role,
+      isActive: adminUsers.isActive,
     })
-    .from(sessions)
-    .innerJoin(users, eq(sessions.userId, users.id))
-    .where(and(eq(sessions.tokenHash, tokenHash), gt(sessions.expiresAt, new Date())))
+    .from(adminSessions)
+    .innerJoin(adminUsers, eq(adminSessions.adminUserId, adminUsers.id))
+    .where(
+      and(
+        eq(adminSessions.tokenHash, hashToken(token)),
+        gt(adminSessions.expiresAt, new Date()),
+        isNull(adminSessions.revokedAt),
+      ),
+    )
     .limit(1);
 
-  return rows[0] ?? null;
+  const row = rows[0];
+  if (!row || !row.isActive) return null;
+  return { id: row.id, email: row.email, name: row.name, role: row.role as AdminRole };
 }
 
-export async function requireUser(): Promise<CurrentUser> {
-  const user = await getCurrentUser();
-  if (!user) {
-    throw new AuthError("Not authenticated");
+/** Throws unless a session exists — use at the top of every console route. */
+export async function requireAdmin(minRole: AdminRole = "support"): Promise<AdminIdentity> {
+  const admin = await getCurrentAdmin();
+  if (!admin) throw new UnauthorizedError();
+  if (minRole === "owner" && admin.role !== "owner") throw new ForbiddenError();
+  return admin;
+}
+
+export async function destroyAdminSession() {
+  const cookieStore = await cookies();
+  const token = cookieStore.get(SESSION_COOKIE)?.value;
+  if (token) {
+    await db.update(adminSessions).set({ revokedAt: new Date() }).where(eq(adminSessions.tokenHash, hashToken(token)));
   }
-  return user;
+  cookieStore.delete(SESSION_COOKIE);
 }
 
-export class AuthError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "AuthError";
+export class UnauthorizedError extends Error {
+  constructor() {
+    super("Unauthorized");
+    this.name = "UnauthorizedError";
+  }
+}
+
+export class ForbiddenError extends Error {
+  constructor() {
+    super("Forbidden");
+    this.name = "ForbiddenError";
   }
 }
