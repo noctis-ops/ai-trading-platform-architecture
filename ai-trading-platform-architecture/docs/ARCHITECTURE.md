@@ -1,76 +1,181 @@
-# Quantum Arena — Architecture
+# Architecture — Private Subscription Trading Assistant
+
+> Product context: `PRODUCT.md` · Rationale: `DECISIONS.md` · Plan: `ROADMAP.md`
 
 ## Overview
-Quantum Arena is a modular, risk-first cryptocurrency leveraged trading platform built on Next.js (App Router), PostgreSQL, and Drizzle ORM. It is designed so each subsystem can evolve independently and, where relevant, be swapped for a production implementation (e.g. a live exchange connector) without touching the rest of the stack.
 
-## Module Map
+A **signals-only**, subscription-gated trading assistant delivered through an
+Arabic Telegram bot. Three properties drive every structural choice:
+
+1. **The brain is pure.** All analysis is `(candles, config) => report` with no
+   I/O, so it is deterministic, unit-testable, and reusable by the live loop,
+   a backtester, and research scripts alike.
+2. **Arabic is presentation, not logic.** The engine emits stable machine
+   `ReasonCode`s; one file renders them into Arabic. Adding a language is a new
+   file, not a refactor.
+3. **Access is one function.** Every command and every fan-out passes through
+   `evaluateAccess`, so revenue-critical logic has a single audit point.
+
+## Module map
 
 ```
 src/
-  db/
-    schema.ts          Drizzle schema: identity, accounts, risk, positions,
-                        orders, trades, strategies, backtests, watchlist,
-                        alerts, notifications, subscriptions, audit_logs
   lib/
-    auth.ts             Password hashing + opaque session tokens
-    api-helpers.ts       Shared account/risk-settings bootstrapping
-    format.ts            Display formatting helpers
-    indicators.ts        SMA/EMA/RSI/ATR/Bollinger/MACD/Donchian, stats
-    portfolio.ts          Mark-to-market position/portfolio aggregation
+    intelligence/            THE BRAIN — pure, no I/O
+      types.ts                 Shared types + calibrated DEFAULT_BRAIN_CONFIG
+      structure.ts             Swings, BOS/CHoCH, S/R + supply/demand zones
+      analysers.ts             Trend, momentum, volume, liquidity, volatility,
+                               price action, zones — each -> score/confidence
+      decision.ts              Confluence scoring, MTF aggregation, trade plan,
+                               ordered veto gates
+      learning.ts              Calibration, self-critique, performance stats
+      __tests__/               Fixtures with known-correct answers + 11 tests
+
+    access/
+      entitlements.ts          THE ACCESS GATE — plans, quotas, expiry (pure)
+      __tests__/               14 tests covering grant AND denial paths
+
     market/
-      symbols.ts          Trading universe metadata
-      simulator.ts         Deterministic synthetic OHLCV engine (GBM + vol clustering)
-    strategies/
-      index.ts             Strategy framework + registry (4 strategies)
-    risk/
-      engine.ts             Order validation, position sizing, liquidation pricing
-    backtest/
-      engine.ts              Bar-by-bar backtest simulator with fees/slippage
+      exchange.ts              MarketDataSource port, failover router with
+                               circuit breaker, candle validation
+      adapters.ts              Binance / Bybit / OKX / simulator
+      simulator.ts             Deterministic offline source
+      symbols.ts               Trading universe metadata
+
+    telegram/
+      messages.ar.ts           THE ONLY place Arabic user copy lives
+      commands.ts              Arabic command router + text normalisation
+      client.ts                Bot API client, rate pacing, broadcast
+      handler.ts               Composition root: parse -> access -> execute
+
+    engine/
+      signal-engine.ts         Orchestration via injected ports (hexagonal)
+
+    auth.ts                    Owner-console sessions only
+  db/schema.ts                 Customers, plans, subscriptions, payments,
+                               signals, outcomes, calibration, audit
   app/
-    api/                     REST API routes (auth, market, orders, positions,
-                             strategies, backtest, risk-settings, watchlist,
-                             alerts, admin, health)
-    dashboard/                Authenticated UI: overview, markets, positions,
-                             orders, strategies, backtests, risk, alerts, admin, docs
-    (auth)/                  Public login/register pages
+    api/telegram/webhook/      The single public entry point
+    api/health/                Liveness probe
+    page.tsx                   Private notice — no public signup
+scripts/
+  calibrate-thresholds.ts      Evidence behind the entry threshold
 ```
 
-## Exchange Abstraction Layer
-Live exchange connectivity requires API keys and stable network access that cannot be guaranteed in every deployment environment, and a platform's own health checks must never depend on a third-party venue being reachable. `src/lib/market/simulator.ts` implements a deterministic Geometric Brownian Motion + volatility-clustering price engine, seeded per symbol so backtests are reproducible. The rest of the codebase (strategies, risk engine, backtester, UI) only depends on the shape `{ time, open, high, low, close, volume }` and a `getLatestPrice(symbol)` function — swapping in a real `ExchangeAdapter` (Binance, Bybit, OKX) means implementing that same surface and registering it; no other module needs to change.
+## The intelligence core
 
-## Strategy Framework
-Every strategy is a pure function `(candles, params) => Signal[]`, so the exact same implementation can run inside the backtester today and a live/paper execution loop tomorrow. Four categories are implemented, one per major style of systematic trading: trend following (SMA crossover), mean reversion (RSI), breakout (Donchian channel), and momentum (smoothed rate-of-change).
+### Scoring: agreement × coverage
 
-## Risk Management
-The risk engine (`src/lib/risk/engine.ts`) is the single choke point every order must pass through:
-1. Leverage caps — account-level and per-symbol (exchange) maximum.
-2. Margin sufficiency — rejects orders the account cannot margin.
-3. Position size cap — notional as % of equity.
-4. Open position cap — enforces diversification.
-5. Daily loss circuit breaker — halts trading once daily realized losses breach a threshold.
-6. Drawdown circuit breaker — halts trading once equity drawdown from its peak breaches a threshold.
-7. Soft warnings — surfaced to the UI when leverage/position size approach (but don't breach) limits.
+Each analyser returns a directional score in `[-1, 1]` and a self-assessed
+confidence in `[0, 1]`. Combining them naively — a plain confidence-weighted
+average over all analysers — conflates two different questions and measurably
+broke the engine: a textbook setup with four confirming reads and four silent
+ones scored **44**, below the entry threshold, because silence was being
+counted as disagreement.
 
-Position sizing can additionally be computed with fixed-fractional risk (`computePositionSize`), and liquidation price is computed from leverage + maintenance margin rate (`computeLiquidationPrice`).
+The scorer now separates them:
 
-## Backtesting Engine
-`src/lib/backtest/engine.ts` walks candles bar-by-bar, applies a strategy's signal series, opens/closes a single position at a time with realistic taker fees (4 bps) and slippage (2 bps), and reports: final equity, total return, CAGR, Sharpe ratio (annualized from per-trade returns), max drawdown, win rate, profit factor, and per-trade P&L. No strategy is assumed profitable — every claim must be backed by these numbers.
+- **Agreement** — confidence-weighted mean over analysers that actually have an
+  opinion (`|score| >= 0.08`). Hesitant analysers sway it less.
+- **Coverage** — how much of the evidence base spoke, weighted by base weight
+  only (participation is binary). Floored at `0.55` so a genuine 3-of-6
+  confluence survives, capped at `1`.
 
-## Data Layer
-PostgreSQL via Drizzle ORM (`src/db/schema.ts`). See the Dependency/Entity map in this document's companion `API.md` for the full table list. All monetary values use `numeric` columns to avoid floating point drift; all identifiers are UUIDs generated client-side via `crypto.randomUUID()` to avoid a dependency on the `pgcrypto` extension.
+`confluence = agreement × coverage`. Volatility is excluded entirely — it is a
+regime gate, never a direction.
 
-## Security Model
-- Passwords hashed with bcrypt (cost factor 12).
-- Sessions are opaque random tokens; only a SHA-256 hash is stored server-side, delivered to the browser via an `httpOnly`, `sameSite=lax` cookie. This allows instant server-side revocation, unlike a stateless JWT.
-- Every mutating API route re-verifies the session and scopes all queries to `req.user.id` — there is no client-supplied user/account id trusted anywhere in the write path.
-- Admin-only routes/pages additionally check `role === "admin"` server-side.
+### Calibrated thresholds
 
-## Observability
-- `orders` retains rejected orders with a `rejectReason`, giving a full audit trail of risk-engine decisions.
-- `audit_logs` table exists for broader compliance-relevant events (schema-ready; wiring up is a roadmap item).
-- `/api/health` provides a liveness probe that verifies DB connectivity.
+`minConfluence` is **measured, not guessed** (`npm run calibrate`):
 
-## Known Simplifications (see DECISIONS.md)
-- Market data is a deterministic simulator, not a live exchange feed.
-- Daily realized PnL for the loss circuit breaker is currently a placeholder (0) pending a trades-by-day aggregate — documented as a roadmap item, not silently hidden.
-- Notifications table exists but delivery (email/webhook) is not yet wired up.
+| Input | Aggregate confluence |
+|---|---|
+| Directionless market, p50 / p90 / p99 | 15 / 40 / **47** |
+| Pure chop | 19 |
+| Textbook A+ breakout / breakdown | **55 / 54** |
+| **Configured threshold** | **52** |
+
+Sitting above the noise p99 and below a genuine setup *is* the product. Re-run
+the script after touching any analyser or weight.
+
+### Ordered veto gates
+
+Twelve gates run in a deliberate order — cheapest and most fundamental first —
+so the reported reason is the root cause, not a downstream symptom. The first
+gate that fails decides the verdict. Gates can only downgrade, never upgrade.
+
+`wait` and `reject` are **successful outcomes**: refusing to trade is the
+single most valuable thing a disciplined system does.
+
+### Trade plans that refuse to lie
+
+- **Stops go to the nearest valid structural level**, not blindly to the last
+  swing. On a breakout the last major swing can sit 7 ATR away while the
+  consolidation base that truly invalidates the idea is 1.5 ATR away.
+- **No silent ATR fallback when structure exists but is far.** That would
+  quietly re-enable the price-chasing this engine exists to prevent; instead it
+  returns `WAIT_BETTER_PRICE`.
+- **Targets are R-multiples** (2R / 3.5R), never fixed percentages.
+- **Exposure is capped at 25%** of portfolio. The textbook formula
+  `risk / stopDistance` returns >100% on a tight stop — printing that in a
+  signal silently assumes leverage the customer may not have.
+
+## Data layer
+
+`MarketDataRouter` fans reads across Binance → Bybit → OKX with a circuit
+breaker: after 3 consecutive failures a venue is skipped for 60s (half-open
+probe after). Blind retries during an outage turn one slow call into N slow
+calls and stall the entire scan.
+
+`validateCandles` rejects non-positive prices, inconsistent OHLC, and
+non-monotonic timestamps before they reach the brain. A single zero-price
+candle can invent a crash and fire a signal — invalid feeds are dropped, not
+patched, and the brain then refuses on `REJECT_INSUFFICIENT_DATA`.
+
+The simulator remains as a last-priority, never-failing source, but is only
+included in production when `ALLOW_SIMULATED_DATA=true` — customers must never
+be served synthetic prices by accident.
+
+## Access control
+
+`evaluateAccess(customer, subscription, now)` is the only authority. Ordering
+is deliberate: **bans are checked before billing**, so a banned user is never
+invited to pay. Cancellation honours the period already purchased.
+`featuresSnapshot` is frozen at purchase so a plan edit cannot retroactively
+downgrade a paying customer.
+
+Gates run in `handler.ts` *before* the command body, so a new command cannot
+ship without subscription enforcement.
+
+## Security
+
+| Surface | Control |
+|---|---|
+| Webhook | Constant-time `secret_token` compare **before** body parsing |
+| Webhook errors | Always 200 to authenticated updates; a poison update must not trigger a Telegram retry storm |
+| Owner sessions | Opaque tokens, SHA-256 hashed at rest, 8h TTL, instant revocation |
+| Licence keys | Hashed at rest — a DB leak cannot be turned into free access |
+| Customer credentials | None exist: `telegramId` is the identity, no exchange keys stored |
+| Privileged commands | Non-owners get the generic "unknown command" reply |
+| Payments | Immutable ledger, unique `(provider, providerRef)` |
+
+## Learning loop
+
+Closed signals become `OutcomeRecord`s. Calibration is deliberately
+conservative: nothing adapts below 25 samples, adjustments are shrunk toward
+neutral (empirical-Bayes style), and the multiplier is clamped to
+`[0.7, 1.15]`. Only **probability** is calibrated — risk limits are policy, not
+something a model may optimise away.
+
+`deriveLessons()` pattern-matches actionable mistakes (stops too tight,
+over-confident buckets, negative-expectancy regimes) and renders them in
+Arabic for the owner.
+
+## Testing
+
+25 tests, all passing (`npm test`). The fixtures encode *known-correct*
+answers, and building them surfaced two real engine bugs (the coverage
+double-count and the ATR fallback bypass). Fixture realism matters: an early
+version used near-zero wicks, which understated ATR and made every structural
+level look 7+ ATR away — the tests were failing because the *fixture* was
+wrong, verified against the real distribution (p90 = 2.65 ATR).
