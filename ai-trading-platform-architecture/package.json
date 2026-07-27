@@ -1,12 +1,17 @@
 {
-  "name": "nextjs-postgresql-template",
+  "name": "private-trading-assistant",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test \"src/**/__tests__/*.test.ts\"",
+    "calibrate": "tsx scripts/calibrate-thresholds.ts",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "admin": "tsx scripts/admin.ts"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
@@ -22,6 +27,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.4",
     "@tailwindcss/postcss": "4.1.17",
     "@types/node": "22.19.15",
     "@types/pg": "8.18.0",
@@ -32,6 +38,7 @@
     "eslint-config-next": "16.2.6",
     "postcss": "8.5.8",
     "tailwindcss": "4.1.17",
+    "tsx": "^4.20.6",
     "typescript": "5.9.3"
   }
 }
