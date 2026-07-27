@@ -60,7 +60,9 @@ export const customers = pgTable(
     /** Per-customer notification preferences (mute windows, symbol filters). */
     preferences: jsonb("preferences").notNull().default({}),
     timezone: text("timezone").notNull().default("Asia/Riyadh"),
-    firstSeenAt: createdAt(),
+    // `createdAt` IS the first-seen timestamp — a separate `firstSeenAt`
+    // mapped to the same column, which silently dropped a field and broke
+    // every INSERT (caught by the schema integration test).
     lastActiveAt: timestamp("last_active_at", { withTimezone: true }),
     createdAt: createdAt(),
   },
