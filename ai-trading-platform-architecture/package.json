@@ -10,7 +10,8 @@
     "test": "tsx --test \"src/**/__tests__/*.test.ts\"",
     "calibrate": "tsx scripts/calibrate-thresholds.ts",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate"
+    "db:migrate": "drizzle-kit migrate",
+    "admin": "tsx scripts/admin.ts"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
