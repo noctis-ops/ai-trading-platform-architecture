@@ -50,6 +50,9 @@ src/
 
     engine/
       signal-engine.ts         Orchestration via injected ports (hexagonal)
+      backtest/                Backtesting harness — replays decide() on
+                               historical candles (runBacktest, computeMetrics,
+                               buildWalkForward) + 8 tests
 
     auth.ts                    Owner-console sessions only
   db/schema.ts                 Customers, plans, subscriptions, payments,
@@ -173,9 +176,32 @@ Arabic for the owner.
 
 ## Testing
 
-25 tests, all passing (`npm test`). The fixtures encode *known-correct*
+52 tests, all passing (`npm test`): 11 intelligence, 21 access, 12 schema
+(real Postgres via PGlite), 8 backtest. The fixtures encode *known-correct*
 answers, and building them surfaced two real engine bugs (the coverage
 double-count and the ATR fallback bypass). Fixture realism matters: an early
 version used near-zero wicks, which understated ATR and made every structural
 level look 7+ ATR away — the tests were failing because the *fixture* was
 wrong, verified against the real distribution (p90 = 2.65 ATR).
+
+## Backtesting (v2.2)
+
+`src/lib/backtest/` replays the **exact** `decide()` path the live bot uses, so
+any number it prints is a property of the shipped brain — not a parallel
+research implementation that can drift. It is pure (no I/O, no DB, no
+Telegram, no Arabic) and reuses the live fill rules from `signal-engine.ts`:
+
+- **Stop-fills-first** when a bar touches both stop and target (worst-case).
+- **TP1 → breakeven**: the stop moves to entry; a later hit is a scratch (0R),
+  not a loss. **TP2** closes the full position at +riskReward2.
+- **Every decision is recorded**, rejections included — selectivity
+  (enter / all-decisions) is an honest health signal.
+- **Walk-forward** (`buildWalkForward`) yields out-of-sample folds that retain
+  warm-up history; the brain config is deliberately **not** re-fit per fold.
+- `computeMetrics` reports win rate, expectancy (R and %), profit factor, max
+  drawdown, and max consecutive losses over **all** decisions.
+
+`scripts/run-backtest.ts` (`npm run backtest`) drives it. By default it runs on
+the **deterministic simulator** and prints a loud *not a performance claim*
+banner — for real statistics, feed real historical candles and paper-run live
+(MASTER.md §10 / SETUP.md §7).
