@@ -1,5 +1,45 @@
 # Changelog
 
+## v2.2.0 — Backtesting engine + honest performance metrics
+
+The "prove it works" stage. The brain is pure, so validating it historically
+required no engine changes — only a harness that feeds it windows of past
+candles and books trades with the SAME conservative rules the live
+`SignalEngine` uses.
+
+### Added — Backtest harness (`src/lib/backtest/`)
+- `runBacktest()` — replays the exact `decide()` path over historical candles;
+  alignment is by **time** (not index) so any timeframe source works, and the
+  exposure gate (`REJECT_EXPOSURE_LIMIT`) prevents stacking on one symbol,
+  exactly like production.
+- `computeMetrics()` — win rate, expectancy (R and %), profit factor, max
+  drawdown, max consecutive losses, computed over **all** decisions (rejections
+  included) so selectivity stays honest. Equity impact uses the plan's own
+  position sizing + stop distance.
+- `buildWalkForward()` — out-of-sample folds that retain warm-up history; the
+  brain config is NOT re-fit per fold (no curve-fitting).
+- Conservative fill rules copied verbatim from `signal-engine.ts`: a bar that
+  touches both stop and target fills the **stop first**; TP1 moves the stop to
+  breakeven (scratch, not a loss); TP2 closes the full position at +3.5R.
+- `scripts/run-backtest.ts` — CLI (`npm run backtest`) with `--symbols`,
+  `--bars`, `--walk-forward`, `--train-bars`, `--test-bars`, `--step`. Defaults
+  to the **deterministic simulator** with a loud "NOT a performance claim"
+  banner; feed real candles before publishing any number.
+- `docs/SETUP.md` — install/run guide plus a backtest section documenting the
+  honesty guarantees and the real-data requirement.
+
+### Tests
+- `src/lib/backtest/__tests__/backtest.test.ts` — 8 tests covering conservative
+  same-bar fills, TP1→breakeven scratch, long/short symmetry, full-decision
+  recording, chop selectivity, walk-forward warm-up, and metric aggregation.
+- Total suite now **52 tests** (was 44).
+
+### Docs
+- `MASTER.md` §9/§10 — v2.2 marked complete (except operational paper-run);
+  test count 44 → 52.
+- `ARCHITECTURE.md` — backtest module added to the map; test count updated.
+- `ROADMAP.md` — v2.2 items checked; paper-run left as the remaining gate.
+
 ## v2.0.0 — Pivot to a private subscription trading assistant
 
 **Breaking:** the public trading platform is replaced by a signals-only,

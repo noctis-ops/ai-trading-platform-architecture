@@ -50,12 +50,17 @@ The critical path to a working paid service.
 
 > Nothing in this section is optional before making performance claims.
 
-- [ ] **Backtest harness** — replay the exact `decide()` path over historical
-      candles; the engine is already pure, so this needs no engine changes
-- [ ] **Walk-forward validation** — out-of-sample windows, not curve-fitting
-- [ ] **Publish honest statistics** — win rate, expectancy, max drawdown,
-      max consecutive losses, computed over *all* decisions
-- [ ] Paper-run in production for a meaningful period before selling
+- [x] **Backtest harness** — `src/lib/backtest/` replays the exact `decide()`
+      path over historical candles; the engine is already pure, so this needs
+      no engine changes. Conservative fills (stop first), every decision
+      recorded. Drive it with `npm run backtest`.
+- [x] **Walk-forward validation** — `buildWalkForward` produces out-of-sample
+      windows; the config is **not** re-fit per fold (no curve-fitting).
+- [x] **Publish honest statistics** — `computeMetrics` reports win rate,
+      expectancy (R and %), profit factor, max drawdown, max consecutive
+      losses, computed over **all** decisions (rejections included).
+- [ ] Paper-run in production for a meaningful period (4–8 weeks) before
+      selling — operational, not code.
 
 ## Later — v3 (scale the business)
 

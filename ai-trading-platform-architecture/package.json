@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test \"src/**/__tests__/*.test.ts\"",
     "calibrate": "tsx scripts/calibrate-thresholds.ts",
+    "backtest": "tsx scripts/run-backtest.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "admin": "tsx scripts/admin.ts"
