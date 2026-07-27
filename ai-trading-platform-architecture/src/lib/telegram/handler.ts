@@ -11,7 +11,7 @@
 // ---------------------------------------------------------------------------
 import { and, count, eq, gte } from "drizzle-orm";
 import { db } from "@/db";
-import { customers, plans, subscriptions, usageEvents } from "@/db/schema";
+import { customers, plans, subscriptions, usageEvents, watchedSymbols } from "@/db/schema";
 import {
   checkQuota,
   denialAr,
@@ -26,7 +26,20 @@ import {
 } from "@/lib/access/entitlements";
 import { parseCommand, type CommandSpec, type ParsedCommand } from "./commands";
 import { TelegramClient, type TelegramUpdate } from "./client";
-import { helpAr, notSubscribedAr, subscriptionActiveAr, subscriptionExpiringSoonAr } from "./messages.ar";
+import {
+  fmtPrice,
+  helpAr,
+  marketStatusAr,
+  noTradeAr,
+  notSubscribedAr,
+  signalOpenedAr,
+  subscriptionActiveAr,
+  subscriptionExpiringSoonAr,
+} from "./messages.ar";
+import { getSignalEngine } from "@/lib/engine/container";
+import { PostgresSignalStore } from "@/lib/engine/postgres-store";
+import { buildReport } from "@/lib/engine/reporting";
+import { REDEEM_AR, redeemLicenceKey, redeemSuccessAr } from "@/lib/access/licence";
 
 let client: TelegramClient | null = null;
 function telegram(): TelegramClient {
@@ -232,19 +245,43 @@ async function runOpenCommand(
       return;
     }
     case "renew":
-    case "redeem":
+    case "redeem": {
+      const rawKey = parsed.args[0];
+      if (!rawKey) {
+        await tg.sendMessage(
+          chatId,
+          [
+            "🔑 تفعيل الاشتراك",
+            "━━━━━━━━━━━━━━━",
+            "أرسل كود التفعيل الخاص بك بالصيغة:",
+            "/تفعيل XXXX-XXXX-XXXX",
+            "",
+            "إذا لم يكن لديك كود، أرسل /الخطط للاطلاع على الخطط، أو /الدعم للتواصل معنا.",
+          ].join("\n"),
+        );
+        return;
+      }
+
+      // Redemption needs a customer row; a user may send a key before /بدء.
+      const [customer] = await db
+        .insert(customers)
+        .values({
+          telegramId,
+          telegramUsername: from.username,
+          displayName: from.first_name,
+          languageCode: from.language_code ?? "ar",
+          status: "pending",
+        })
+        .onConflictDoUpdate({ target: customers.telegramId, set: { lastActiveAt: new Date() } })
+        .returning({ id: customers.id });
+
+      const result = await redeemLicenceKey(customer.id, rawKey);
       await tg.sendMessage(
         chatId,
-        [
-          "🔑 تفعيل الاشتراك",
-          "━━━━━━━━━━━━━━━",
-          "أرسل كود التفعيل الخاص بك بالصيغة:",
-          "/تفعيل XXXX-XXXX-XXXX",
-          "",
-          "إذا لم يكن لديك كود، أرسل /الخطط للاطلاع على الخطط، أو /الدعم للتواصل معنا.",
-        ].join("\n"),
+        result.ok ? redeemSuccessAr(result.planCode, result.daysAdded, result.newPeriodEnd) : REDEEM_AR[result.code],
       );
       return;
+    }
     case "support":
       await tg.sendMessage(
         chatId,
@@ -256,14 +293,148 @@ async function runOpenCommand(
   }
 }
 
+/**
+ * Subscriber commands. Access, feature and quota gates have already passed by
+ * the time we get here — this function only executes and formats.
+ *
+ * Errors are caught per-command: a market-data outage must produce a calm
+ * Arabic apology, never a silent non-reply that looks like a dead bot.
+ */
 async function runSubscriberCommand(parsed: ParsedCommand, chatId: bigint, grant: AccessGrant): Promise<void> {
   const tg = telegram();
-  // Wired to the SignalEngine + reporting services in the implementation
-  // phase; the access pipeline above is complete and enforced today.
-  await tg.sendMessage(
-    chatId,
-    `⏳ جارٍ تنفيذ الأمر ${parsed.spec.ar}${parsed.symbol ? ` على ${parsed.symbol}` : ""}...\n(خطتك: ${grant.planCode})`,
-  );
+
+  try {
+    switch (parsed.spec.id) {
+      case "status":
+      case "analyse": {
+        const symbol = parsed.symbol ?? (await defaultSymbol());
+        if (!symbol) {
+          await tg.sendMessage(chatId, "لم أتعرف على العملة. مثال: /تحليل BTC");
+          return;
+        }
+
+        const allowed = await symbolAllowedFor(grant, symbol);
+        if (!allowed) {
+          await tg.sendMessage(chatId, `العملة ${symbol} غير مشمولة في خطتك. أرسل /الخطط للترقية.`);
+          return;
+        }
+
+        await tg.sendMessage(chatId, `🔍 جارٍ تحليل ${symbol}...`);
+        const decision = await getSignalEngine().analyse(symbol);
+
+        // /الحالة is always the market read; /تحليل shows the tradeable plan
+        // when one exists, and the reasoned refusal when it does not.
+        if (parsed.spec.id === "status") {
+          await tg.sendMessage(chatId, marketStatusAr(symbol, decision));
+          return;
+        }
+        await tg.sendMessage(
+          chatId,
+          decision.plan
+            ? signalOpenedAr({ symbol, plan: decision.plan, decision })
+            : noTradeAr(symbol, decision),
+        );
+        return;
+      }
+
+      case "openTrades": {
+        const open = await new PostgresSignalStore().getOpenSignals();
+        await tg.sendMessage(chatId, openTradesAr(open));
+        return;
+      }
+
+      case "performance": {
+        const { textAr } = await buildReport("all");
+        await tg.sendMessage(chatId, textAr);
+        return;
+      }
+
+      case "reportDaily":
+      case "reportWeekly":
+      case "reportMonthly": {
+        const period = parsed.spec.id === "reportDaily" ? "daily" : parsed.spec.id === "reportWeekly" ? "weekly" : "monthly";
+        const { textAr } = await buildReport(period);
+        await tg.sendMessage(chatId, textAr);
+        return;
+      }
+
+      case "settings":
+        await tg.sendMessage(
+          chatId,
+          [
+            "⚙️ الإعدادات",
+            "━━━━━━━━━━━━━━━",
+            `الخطة الحالية: ${grant.planCode}`,
+            `العملات المشمولة: ${grant.features.maxSymbols === -1 ? "الكل" : grant.features.maxSymbols}`,
+            `تحليل عند الطلب: ${grant.features.onDemandAnalysisPerDay === -1 ? "غير محدود" : `${grant.features.onDemandAnalysisPerDay} يومياً`}`,
+            `المتبقي على الاشتراك: ${grant.daysRemaining} يوم`,
+            "",
+            "لتعديل تفضيلات التنبيهات تواصل مع الدعم عبر /الدعم.",
+          ].join("\n"),
+        );
+        return;
+
+      default:
+        await tg.sendMessage(chatId, helpAr());
+    }
+  } catch (err) {
+    console.error("[telegram] subscriber command failed", { command: parsed.spec.id, error: (err as Error).message });
+    await tg.sendMessage(
+      chatId,
+      "تعذّر تنفيذ الطلب حالياً بسبب مشكلة مؤقتة في مصادر البيانات. حاول بعد قليل، وإن تكرر الأمر تواصل عبر /الدعم.",
+    );
+  }
+}
+
+/** First symbol in the owner-curated universe — used when none is supplied. */
+async function defaultSymbol(): Promise<string | undefined> {
+  const rows = await db
+    .select({ symbol: watchedSymbols.symbol })
+    .from(watchedSymbols)
+    .where(eq(watchedSymbols.isActive, true))
+    .orderBy(watchedSymbols.sortOrder)
+    .limit(1);
+  return rows[0]?.symbol;
+}
+
+/**
+ * Tier gating uses the same canonical ordering as delivery, so "basic gets 3
+ * symbols" means the same three symbols everywhere in the product.
+ */
+async function symbolAllowedFor(grant: AccessGrant, symbol: string): Promise<boolean> {
+  if (grant.features.maxSymbols === -1) return true;
+  const rows = await db
+    .select({ symbol: watchedSymbols.symbol })
+    .from(watchedSymbols)
+    .where(eq(watchedSymbols.isActive, true))
+    .orderBy(watchedSymbols.sortOrder);
+  return rows
+    .slice(0, grant.features.maxSymbols)
+    .some((r) => r.symbol === symbol);
+}
+
+function openTradesAr(open: { symbol: string; direction: "long" | "short"; entryPrice: number; stopLoss: number; takeProfit1: number; status: string }[]): string {
+  if (open.length === 0) {
+    return [
+      "📭 لا توجد صفقات مفتوحة حالياً",
+      "━━━━━━━━━━━━━━━",
+      "النظام في وضع المراقبة. لا ندخل صفقة بدون سبب قوي.",
+    ].join("\n");
+  }
+
+  const blocks = open.map((s) => {
+    const dir = s.direction === "long" ? "🟢 شراء" : "🔴 بيع";
+    const state = s.status === "tp1_hit" ? "تحقق الهدف الأول — الوقف عند نقطة الدخول" : "نشطة";
+    return [
+      `${dir} — ${s.symbol}`,
+      `  الدخول: ${fmtPrice(s.entryPrice)}`,
+      `  الهدف الأول: ${fmtPrice(s.takeProfit1)}`,
+      `  الوقف: ${fmtPrice(s.stopLoss)}`,
+      `  الحالة: ${state}`,
+    ].join("\n");
+  });
+
+  return [`📈 الصفقات المفتوحة (${open.length})`, "━━━━━━━━━━━━━━━", blocks.join("\n\n")].join("\n");
 }
 
 async function renderPlansAr(): Promise<string> {
