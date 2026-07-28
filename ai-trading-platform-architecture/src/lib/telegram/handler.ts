@@ -56,6 +56,17 @@ const OWNER_TELEGRAM_IDS = (process.env.OWNER_TELEGRAM_IDS ?? "")
   .map((s) => s.trim())
   .filter(Boolean);
 
+export async function alertOwners(text: string): Promise<void> {
+  const tg = telegram();
+  for (const ownerId of OWNER_TELEGRAM_IDS) {
+    try {
+      await tg.sendMessage(BigInt(ownerId), text);
+    } catch (err) {
+      console.error("[telegram] failed to alert owner", { ownerId, error: (err as Error).message });
+    }
+  }
+}
+
 /** Identical reply for unknown and unauthorised-privileged commands, so a
  *  stranger can never discover that owner tooling exists. */
 const UNKNOWN_REPLY = "لم أفهم طلبك. أرسل /مساعدة لعرض الأوامر المتاحة.";
