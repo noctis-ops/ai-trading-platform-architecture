@@ -33,15 +33,15 @@ tests and a reproducible calibration study.
 
 The critical path to a working paid service.
 
-- [ ] **Wire subscriber commands to the engine** — `runSubscriberCommand` is
+- [x] **Wire subscriber commands to the engine** — `runSubscriberCommand` is
       the single connection point; `/تحليل`, `/الحالة`, `/الصفقات` become real
-- [ ] **`SignalStore` Postgres implementation** — the port is defined and the
+- [x] **`SignalStore` Postgres implementation** — the port is defined and the
       schema exists; this is the adapter
-- [ ] **Scheduled jobs** — periodic scan, open-signal tracking, daily/weekly/
+- [x] **Scheduled jobs** — periodic scan, open-signal tracking, daily/weekly/
       monthly reports, expiry reminders
-- [ ] **Licence key redemption** — generate, hash, redeem, extend subscription
-- [ ] **Owner console UI** — customers, subscriptions, revenue, engine health
-- [ ] **Database migrations** — generate and commit the initial Drizzle
+- [x] **Licence key redemption** — generate, hash, redeem, extend subscription
+- [x] **Owner console UI** — customers, subscriptions, revenue, engine health
+- [x] **Database migrations** — generate and commit the initial Drizzle
       migration
 - [ ] **Integration test** — fake Telegram + in-memory store, asserting the
       full path from update to delivered Arabic message
