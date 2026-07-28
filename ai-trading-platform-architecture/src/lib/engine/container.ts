@@ -12,6 +12,7 @@
 import { buildSources } from "../market/adapters";
 import { MarketDataRouter } from "../market/exchange";
 import { TelegramClient } from "../telegram/client";
+import { alertOwners } from "../telegram/handler";
 import { PostgresSignalStore } from "./postgres-store";
 import { TelegramNotifier } from "./telegram-notifier";
 import { SignalEngine, DEFAULT_ENGINE_CONFIG, type EngineConfig } from "./signal-engine";
@@ -21,7 +22,14 @@ let telegramInstance: TelegramClient | null = null;
 let engineInstance: SignalEngine | null = null;
 
 export function getMarketRouter(): MarketDataRouter {
-  if (!routerInstance) routerInstance = new MarketDataRouter(buildSources());
+  if (!routerInstance) {
+    routerInstance = new MarketDataRouter(
+      buildSources(),
+      3,
+      60_000,
+      (source) => alertOwners(`⚠️ تنبيه: تم إيقاف مصدر البيانات مؤقتاً لتكرار الأعطال (${source}). النظام سيستمر بالعمل عبر المصادر البديلة إن وجدت.`).catch(console.error)
+    );
+  }
   return routerInstance;
 }
 

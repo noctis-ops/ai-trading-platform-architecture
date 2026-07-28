@@ -11,6 +11,7 @@
 // ---------------------------------------------------------------------------
 import { safeEqual } from "@/lib/auth";
 import { runExpiryJob, runOutcomesJob, runReportJob, runScanJob, runTrackJob, type JobResult } from "@/lib/engine/jobs";
+import { alertOwners } from "@/lib/telegram/handler";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -54,6 +55,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ job: string }>
     // 500 here is correct (unlike the Telegram webhook): a scheduler SHOULD
     // retry a failed job, and we want the failure visible in monitoring.
     console.error("[cron] failed", { job, error: (err as Error).message });
+    await alertOwners(`🚨 فشل مهمة مجدولة (${job}):\n\n${(err as Error).message}`).catch(console.error);
     return Response.json({ job, ok: false, error: (err as Error).message }, { status: 500 });
   }
 }

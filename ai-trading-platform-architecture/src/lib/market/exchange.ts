@@ -66,6 +66,7 @@ export class MarketDataRouter {
     sources: MarketDataSource[],
     private readonly threshold = 3,
     private readonly cooldownMs = 60_000,
+    private readonly onCircuitOpen?: (source: ExchangeId) => void,
   ) {
     this.sources = [...sources].sort((a, b) => a.priority - b.priority);
     for (const s of this.sources) this.breakers.set(s.id, { failures: 0, openedAt: null });
@@ -90,7 +91,13 @@ export class MarketDataRouter {
   private recordFailure(id: ExchangeId, now: number) {
     const b = this.breakers.get(id) ?? { failures: 0, openedAt: null };
     b.failures += 1;
-    if (b.failures >= this.threshold) b.openedAt = now;
+    if (b.failures >= this.threshold) {
+      const newlyOpened = b.openedAt === null;
+      b.openedAt = now;
+      if (newlyOpened && this.onCircuitOpen) {
+        this.onCircuitOpen(id);
+      }
+    }
     this.breakers.set(id, b);
   }
 
