@@ -47,6 +47,10 @@ function telegram(): TelegramClient {
   return client;
 }
 
+export function setTelegramClientForTest(fakeClient: TelegramClient | null) {
+  client = fakeClient;
+}
+
 const OWNER_TELEGRAM_IDS = (process.env.OWNER_TELEGRAM_IDS ?? "")
   .split(",")
   .map((s) => s.trim())

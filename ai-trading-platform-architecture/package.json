@@ -7,7 +7,7 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test \"src/**/__tests__/*.test.ts\"",
+    "test": "DATABASE_URL=postgres://dummy tsx --test \"src/**/__tests__/*.test.ts\"",
     "calibrate": "tsx scripts/calibrate-thresholds.ts",
     "backtest": "tsx scripts/run-backtest.ts",
     "db:generate": "drizzle-kit generate",

@@ -68,18 +68,19 @@ test("conservative fill: a bar touching both stop and target takes the stop", ()
   const candles = [bar(100, 100, 100, 100, 0), bar(100, 108, 97, 100, 1)];
   const t = simulateTrade(plan(), "long", candles, 1, "TEST");
   assert.equal(t.outcome, "stop");
-  assert.ok(t.rMultiple < 0, "must be a losing trade");
-  assert.ok(Math.abs(t.rMultiple + 1) < 1e-9, `expected -1R, got ${t.rMultiple}`);
+  assert.ok(t.rMultiple < -1, "must be worse than -1R due to fees");
+  assert.ok(Math.abs(t.rMultiple + 1.0683720930232516) < 1e-9, `expected approx -1.068R, got ${t.rMultiple}`);
 });
 
-test("TP2 reached without touching the stop yields +riskReward2", () => {
+test("TP2 reached without touching the stop yields +riskReward2 minus fees", () => {
   const candles = [bar(100, 100, 100, 100, 0), bar(100, 108, 99, 105, 1)];
   const t = simulateTrade(plan(), "long", candles, 1, "TEST");
   assert.equal(t.outcome, "tp2");
-  assert.ok(Math.abs(t.rMultiple - 3.5) < 1e-9, `expected 3.5R, got ${t.rMultiple}`);
+  assert.ok(t.rMultiple < 3.5, "must be less than 3.5R due to fees");
+  assert.ok(Math.abs(t.rMultiple - 3.111395348837199) < 1e-9, `expected approx 3.111R, got ${t.rMultiple}`);
 });
 
-test("TP1 then a hit at breakeven is a scratch (0R), not a loss", () => {
+test("TP1 then a hit at breakeven is a scratch (negative R due to fees), not a full loss", () => {
   const candles = [
     bar(100, 100, 100, 100, 0),
     bar(100, 105, 99, 104, 1), // TP1 (104) hit -> stop moves to breakeven (100)
@@ -87,15 +88,16 @@ test("TP1 then a hit at breakeven is a scratch (0R), not a loss", () => {
   ];
   const t = simulateTrade(plan(), "long", candles, 1, "TEST");
   assert.equal(t.outcome, "breakeven");
-  assert.ok(Math.abs(t.rMultiple) < 1e-9, `expected 0R, got ${t.rMultiple}`);
+  assert.ok(t.rMultiple < 0 && t.rMultiple > -0.1, "must be a slight loss due to fees");
+  assert.ok(Math.abs(t.rMultiple - -0.06987209302325183) < 1e-9, `expected approx -0.069R, got ${t.rMultiple}`);
 });
 
 test("short trade mirrors the long conservative fill", () => {
   const shortPlan = plan({ direction: "short", entry: 100, stopLoss: 102, takeProfit1: 96, takeProfit2: 93 });
   const candles = [bar(100, 100, 100, 100, 0), bar(100, 103, 92, 100, 1)];
   const t = simulateTrade(shortPlan, "short", candles, 1, "TEST");
-  assert.ok(t.rMultiple < 0, "short should stop out");
-  assert.ok(Math.abs(t.rMultiple + 1) < 1e-9, `expected -1R, got ${t.rMultiple}`);
+  assert.ok(t.rMultiple < -1, "short should stop out and be worse than -1R due to fees");
+  assert.ok(Math.abs(t.rMultiple + 1.0711627906976775) < 1e-9, `expected approx -1.071R, got ${t.rMultiple}`);
 });
 
 test("runBacktest records every decision and yields bounded metrics on a trend", () => {
@@ -133,4 +135,43 @@ test("aggregateMetrics sums raw counts across symbols", () => {
   assert.equal(agg.totalDecisions, a.totalDecisions + b.totalDecisions);
   assert.equal(agg.trades, a.trades.length + b.trades.length);
   assert.equal(agg.entries, a.entries + b.entries);
+});
+
+test("fees and slippage: entry price is penalized by 15bps for long trades", () => {
+  const candles = [bar(100, 100, 100, 100, 0), bar(100, 108, 99, 105, 1)];
+  const t = simulateTrade(plan(), "long", candles, 1, "TEST");
+  assert.equal(t.entryPrice, 100.15, "long entry price should be increased by 15bps (100 * 1.0015)");
+});
+
+test("fees and slippage: exit price is penalized by 15bps for long trades", () => {
+  const candles = [bar(100, 100, 100, 100, 0), bar(100, 108, 99, 105, 1)];
+  const t = simulateTrade(plan(), "long", candles, 1, "TEST");
+  // TP2 is 107. We expect exit at 107.
+  // Then exit is penalized by 15bps: 107 * 0.9985 = 106.8395
+  assert.equal(t.exitPrice, 106.8395, "long exit price should be decreased by 15bps on TP2");
+});
+
+test("fees and slippage: entry price is penalized by 15bps for short trades", () => {
+  const shortPlan = plan({ direction: "short", entry: 100, stopLoss: 102, takeProfit1: 96, takeProfit2: 93 });
+  const candles = [bar(100, 100, 100, 100, 0), bar(100, 103, 92, 100, 1)];
+  const t = simulateTrade(shortPlan, "short", candles, 1, "TEST");
+  assert.ok(Math.abs(t.entryPrice - 99.85) < 1e-9, "short entry price should be decreased by 15bps (100 * 0.9985)");
+});
+
+test("fees and slippage: exit price is penalized by 15bps for short trades", () => {
+  const shortPlan = plan({ direction: "short", entry: 100, stopLoss: 102, takeProfit1: 96, takeProfit2: 93 });
+  const candles = [bar(100, 100, 100, 100, 0), bar(100, 103, 92, 100, 1)];
+  const t = simulateTrade(shortPlan, "short", candles, 1, "TEST");
+  // Stop is 102. Exit is penalized by 15bps: 102 * 1.0015 = 102.153
+  assert.equal(t.exitPrice, 102.153, "short exit price should be increased by 15bps on stop");
+});
+
+test("runBacktest handles overlapping trades gracefully if allowOverlap is true", () => {
+  const p = plan();
+  const candles = [bar(100,100,100,100,0), bar(100,100,100,100,1), bar(100,100,100,100,2)];
+  // We mock a decision config to ensure overlapping entries can be triggered if allowed
+  const config = { symbol: "TEST", allowOverlap: true };
+  const r = runBacktest(mtf(breakoutWithTail("up")), config);
+  assert.ok(r.totalDecisions > 0);
+  assert.ok(r.trades.length > 0);
 });

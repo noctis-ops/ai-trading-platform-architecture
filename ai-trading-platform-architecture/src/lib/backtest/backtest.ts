@@ -87,14 +87,18 @@ export function simulateTrade(
   symbol: string,
 ): BacktestTrade {
   const isLong = direction === "long";
-  const entryPrice = fastCandles[entryIndex].open;
+  const rawEntryPrice = fastCandles[entryIndex].open;
+  // Apply 10bps fee + 5bps slippage (15bps total) per MASTER.md
+  const entryPrice = isLong ? rawEntryPrice * 1.0015 : rawEntryPrice * 0.9985;
   let stopLoss = plan.stopLoss;
   const tp1 = plan.takeProfit1;
   const tp2 = plan.takeProfit2;
   const risk = Math.abs(entryPrice - stopLoss);
   let stopMovedToBreakeven = false;
 
-  const close = (exitIndex: number, exitPrice: number): BacktestTrade => {
+  const close = (exitIndex: number, rawExitPrice: number): BacktestTrade => {
+    // Apply 15bps on exit
+    const exitPrice = isLong ? rawExitPrice * 0.9985 : rawExitPrice * 1.0015;
     const signed = isLong ? exitPrice - entryPrice : entryPrice - exitPrice;
     const r = risk > 0 ? signed / risk : 0;
     let outcome: BacktestTrade["outcome"];
