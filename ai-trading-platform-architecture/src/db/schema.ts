@@ -65,9 +65,17 @@ export const customers = pgTable(
     // every INSERT (caught by the schema integration test).
     lastActiveAt: timestamp("last_active_at", { withTimezone: true }),
     createdAt: createdAt(),
+    /** The code this customer can share to refer others. */
+    referralCode: text("referral_code").unique(),
+    /** The ID of the customer who referred this user. */
+    referredBy: uuid("referred_by"),
   },
-  (t) => [index("customers_status_idx").on(t.status)],
+  (t) => [
+    index("customers_status_idx").on(t.status),
+  ],
 );
+
+// We define referredBy outside to avoid circular references if necessary, or just inside. Let's define inside.
 
 /** Owner + support staff. Separate table so staff auth never touches customers. */
 export const adminUsers = pgTable("admin_users", {
@@ -80,6 +88,15 @@ export const adminUsers = pgTable("admin_users", {
   totpSecret: text("totp_secret"),
   isActive: boolean("is_active").notNull().default(true),
   lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
+  createdAt: createdAt(),
+});
+
+export const economicEvents = pgTable("economic_events", {
+  id: id(),
+  currency: text("currency").notNull(),
+  impact: text("impact").notNull(), // "high", "medium", "low"
+  eventTime: timestamp("event_time", { withTimezone: true }).notNull(),
+  title: text("title").notNull(),
   createdAt: createdAt(),
 });
 

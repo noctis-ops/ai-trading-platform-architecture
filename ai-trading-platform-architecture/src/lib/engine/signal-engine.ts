@@ -16,7 +16,7 @@ import { decide, type DecisionContext } from "../intelligence/decision";
 import { DEFAULT_BRAIN_CONFIG, type BrainConfig, type Candle, type Decision, type Timeframe } from "../intelligence/types";
 import { validateCandles, type MarketDataRouter } from "../market/exchange";
 
-export const ENGINE_VERSION = "2.0.0";
+export const ENGINE_VERSION = process.env.ENGINE_VERSION ?? "2.2.0";
 
 export type StoredSignal = {
   id: string;

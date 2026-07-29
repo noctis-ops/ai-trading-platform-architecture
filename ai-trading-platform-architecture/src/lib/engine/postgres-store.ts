@@ -12,7 +12,7 @@
 // ---------------------------------------------------------------------------
 import { and, count, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { analysisSnapshots, calibration, signalEvents, signals, watchedSymbols } from "@/db/schema";
+import { analysisSnapshots, calibration, signalEvents, signals, watchedSymbols, economicEvents } from "@/db/schema";
 import type { Decision } from "../intelligence/types";
 import type { SignalStore, StoredSignal } from "./signal-engine";
 
@@ -121,8 +121,24 @@ export class PostgresSignalStore implements SignalStore {
    * (ROADMAP v3). Returning a hardcoded `true` would silence the bot, and
    * pretending to check would be worse than admitting we do not yet.
    */
-  async isNewsBlackout(_symbol: string, _at: Date): Promise<boolean> {
-    return false;
+  async isNewsBlackout(symbol: string, at: Date): Promise<boolean> {
+    const base = symbol.slice(0, 3);
+    const quote = symbol.slice(3, 6);
+    
+    const blackoutMs = 30 * 60_000;
+    const windowStart = new Date(at.getTime() - blackoutMs);
+    const windowEnd = new Date(at.getTime() + blackoutMs);
+
+    const rows = await db.select({ count: count() })
+      .from(economicEvents)
+      .where(and(
+        inArray(economicEvents.currency, [base, quote, "USD"]),
+        eq(economicEvents.impact, "high"),
+        gte(economicEvents.eventTime, windowStart),
+        sql`${economicEvents.eventTime} <= ${windowEnd}`
+      ));
+
+    return Number(rows[0]?.count ?? 0) > 0;
   }
 
   /**

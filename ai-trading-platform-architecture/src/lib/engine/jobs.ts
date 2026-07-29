@@ -5,9 +5,9 @@
 // route, a worker process, or a test. They are deliberately idempotent-ish and
 // individually failure-isolated: one bad symbol must never abort a whole scan.
 // ---------------------------------------------------------------------------
-import { and, eq, gte, inArray, lte, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, lte, lt, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { calibration, customers, deliveryLog, plans, signalOutcomes, signals, subscriptions } from "@/db/schema";
+import { calibration, customers, deliveryLog, plans, signalOutcomes, signals, subscriptions, economicEvents } from "@/db/schema";
 import { calibrateAll, deriveLessons } from "../intelligence/learning";
 import { subscriptionExpiringSoonAr } from "../telegram/messages.ar";
 import { getSignalEngine, getTelegramClient } from "./container";
@@ -196,4 +196,13 @@ export async function runExpiryJob(warningDays = 3): Promise<JobResult> {
     .returning({ id: subscriptions.id });
 
   return { job: "expiry", ok: true, details: { warned, expired: expired.length } };
+}
+
+export async function runCalendarJob(): Promise<JobResult> {
+  // In a real implementation, this would fetch from an API like ForexFactory
+  // For the sandbox, we just clear old events.
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  await db.delete(economicEvents).where(lt(economicEvents.eventTime, cutoff));
+  
+  return { job: "calendar", ok: true, details: { "cleanedOldEvents": true } };
 }
