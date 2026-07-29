@@ -64,6 +64,41 @@ const REASON_EN: Record<ReasonCode, (d: Detail) => string> = {
     d?.stopAtrMultiple
       ? `Price has moved too far from invalidation level (${d.stopAtrMultiple}x ATR) — waiting for pullback`
       : "Price is overextended — waiting for a better entry point",
+
+  // v3.0 — Order Flow
+  VWAP_BULLISH: () => "Price above VWAP — institutional buying pressure",
+  VWAP_BEARISH: () => "Price below VWAP — institutional selling pressure",
+  VWAP_CROSSOVER_UP: () => "Price crossed above VWAP",
+  VWAP_CROSSOVER_DOWN: () => "Price crossed below VWAP",
+  VP_POC_SUPPORT: (d) => `POC at ${d?.poc ?? "—"} acting as support`,
+  VP_POC_RESISTANCE: (d) => `POC at ${d?.poc ?? "—"} acting as resistance`,
+  VP_VALUE_AREA_BREAKOUT: () => "Value area breakout — volume-backed move",
+  CVD_BULLISH: () => "CVD positive — net buying accumulation",
+  CVD_BEARISH: () => "CVD negative — net selling accumulation",
+  CVD_DIVERGENCE_BEAR: () => "CVD bearish divergence — hidden distribution",
+
+  // v3.0 — Reversal
+  REVERSAL_HAMMER: () => "Hammer candle — strong rejection of downside",
+  REVERSAL_SHOOTING_STAR: () => "Shooting star — strong rejection of upside",
+  REVERSAL_DIVERGENCE_BULL: () => "Bullish divergence — potential reversal",
+  REVERSAL_DIVERGENCE_BEAR: () => "Bearish divergence — potential reversal",
+  REVERSAL_OVERSOLD: (d) => `Oversold (RSI ${d?.rsi ?? "—"}) — bounce expected`,
+  REVERSAL_OVERBOUGHT: (d) => `Overbought (RSI ${d?.rsi ?? "—"}) — correction expected`,
+
+  // v3.0 — Breakout
+  BREAKOUT_SQUEEZE_UP: (d) => `Bollinger squeeze (${d?.squeezeBars ?? 0} bars) — potential upside breakout`,
+  BREAKOUT_SQUEEZE_DOWN: (d) => `Bollinger squeeze (${d?.squeezeBars ?? 0} bars) — potential downside breakout`,
+  BREAKOUT_VOLUME_SURGE: (d) => `Volume surge (${d?.ratio ?? "—"}x) confirms breakout`,
+
+  // v3.0 — On-Chain
+  ONCHAIN_FUNDING_BULLISH: () => "Negative funding — bullish reversal signal",
+  ONCHAIN_FUNDING_BEARISH: () => "Funding extremely high — liquidation risk",
+  ONCHAIN_OI_TRENDING: () => "Open interest supports current trend",
+  ONCHAIN_LS_EXTREME: () => "Long/short ratio at extreme — contrarian signal",
+
+  // v3.0 — New gate
+  REJECT_CORRELATION_OVERLAP: (d) =>
+    `High correlation with ${d?.symbol ?? "another pair"} (${d?.correlation ?? "—"}) — position reduced`,
 };
 
 export function reasonEn(reason: Reason): string {

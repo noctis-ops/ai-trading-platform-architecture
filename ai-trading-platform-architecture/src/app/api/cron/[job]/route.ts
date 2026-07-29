@@ -10,7 +10,7 @@
 // timer, cron + curl). Suggested cadence is in docs/OPERATIONS.md.
 // ---------------------------------------------------------------------------
 import { safeEqual } from "@/lib/auth";
-import { runExpiryJob, runOutcomesJob, runReportJob, runScanJob, runTrackJob, runCalendarJob, type JobResult } from "@/lib/engine/jobs";
+import { runExpiryJob, runOutcomesJob, runReportJob, runScanJob, runTrackJob, runCalendarJob, runTradingSyncJob, type JobResult } from "@/lib/engine/jobs";
 import { alertOwners } from "@/lib/telegram/handler";
 
 export const dynamic = "force-dynamic";
@@ -27,6 +27,7 @@ const JOBS: Record<string, () => Promise<JobResult>> = {
   "report-daily": () => runReportJob("daily"),
   "report-weekly": () => runReportJob("weekly"),
   "report-monthly": () => runReportJob("monthly"),
+  "trading-sync": runTradingSyncJob,
 };
 
 export async function POST(req: Request, ctx: { params: Promise<{ job: string }> }) {

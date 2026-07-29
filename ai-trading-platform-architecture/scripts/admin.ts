@@ -375,9 +375,79 @@ Customers
   pause <telegramId>                     Pause subscription (keeps history)
   resume <telegramId>                    Resume a paused subscription
 
+Trading
+  trading-status                         Show auto-trader state (mode, equity, positions)
+  trading-enable                         Enable auto-trading
+  trading-disable                        Disable auto-trading
+  trading-config <key> <value>           Update a trading config value at runtime
+
 Insight
   stats                                  Business + engine snapshot
 `;
+
+async function tradingStatus() {
+  const { getAutoTrader } = await import("../src/lib/engine/container");
+  const trader = getAutoTrader();
+  const state = trader.getState();
+
+  const line = "─".repeat(46);
+  console.log(`\n📊 Auto-Trader Status\n${line}`);
+  console.log(`  Mode:        ${state.mode}`);
+  console.log(`  Enabled:     ${state.config.enabled ? "✅ yes" : "❌ no"}`);
+  console.log(`  Halted:      ${state.isHalted ? `⚠️ YES — ${state.haltReason}` : "✅ no"}`);
+  console.log(`  Equity:      ${state.equity.toFixed(2)} USDT`);
+  console.log(`  Peak Equity: ${state.peakEquity.toFixed(2)} USDT`);
+  console.log(`  Daily P&L:   ${state.dailyPnl >= 0 ? "+" : ""}${state.dailyPnl.toFixed(2)} USDT`);
+  console.log(`  Drawdown:    ${state.peakEquity > 0 ? ((1 - state.equity / state.peakEquity) * 100).toFixed(2) : 0}%`);
+
+  console.log(`\n  Risk Settings:`);
+  console.log(`    Risk/Trade:     ${state.config.riskPerTradePct}%`);
+  console.log(`    Max Daily Loss: ${state.config.maxDailyLossPct}%`);
+  console.log(`    Max Drawdown:   ${state.config.maxDrawdownPct}%`);
+  console.log(`    Max Positions:  ${state.config.maxConcurrentPositions}`);
+  console.log(`    Leverage:       ${state.config.leverage}x (max ${state.config.maxLeverage}x)`);
+  console.log(`    Sizing Method:  ${state.config.sizingMethod}`);
+  console.log(`    Trail Stop:     ${state.config.trailStop ? "✅" : "❌"}`);
+  console.log(`    Breakeven:      ${state.config.moveStopToBreakeven ? "✅" : "❌"}`);
+
+  console.log(`\n  Open Positions: ${state.openPositions.length}`);
+  for (const pos of state.openPositions) {
+    const pnl = pos.unrealisedPnl;
+    const sign = pnl >= 0 ? "+" : "";
+    console.log(`    ${pos.direction.toUpperCase().padEnd(5)} ${pos.symbol.padEnd(10)} ` +
+      `entry=${pos.entryPrice.toFixed(2)} size=${pos.quantity} ` +
+      `PnL=${sign}${pnl.toFixed(2)} (${sign}${pos.unrealisedPnlPct.toFixed(2)}%) ` +
+      `R=${pos.mfeR >= 0 ? "+" : ""}${pos.mfeR.toFixed(2)}R`);
+  }
+
+  console.log(line);
+}
+
+async function tradingEnable() {
+  const { getAutoTrader } = await import("../src/lib/engine/container");
+  const trader = getAutoTrader();
+  trader.setEnabled(true);
+  console.log("✅ Auto-trading enabled");
+}
+
+async function tradingDisable() {
+  const { getAutoTrader } = await import("../src/lib/engine/container");
+  const trader = getAutoTrader();
+  trader.setEnabled(false);
+  console.log("⏸️  Auto-trading disabled");
+}
+
+async function tradingConfigSet(key?: string, value?: string) {
+  if (!key || value === undefined) throw new Error("usage: trading-config <key> <value>");
+  const { getAutoTrader } = await import("../src/lib/engine/container");
+  const trader = getAutoTrader();
+  const numVal = Number.parseFloat(value);
+  const patch: Record<string, unknown> = {
+    [key]: Number.isFinite(numVal) ? numVal : value === "true" ? true : value === "false" ? false : value,
+  };
+  trader.updateConfig(patch as any);
+  console.log(`✅ trading.${key} = ${value}`);
+}
 
 async function main() {
   switch (command) {
@@ -392,6 +462,10 @@ async function main() {
     case "pause": return pauseSubscription(args[0], false);
     case "resume": return pauseSubscription(args[0], true);
     case "stats": return stats();
+    case "trading-status": return tradingStatus();
+    case "trading-enable": return tradingEnable();
+    case "trading-disable": return tradingDisable();
+    case "trading-config": return tradingConfigSet(args[0], args[1]);
     default:
       console.log(HELP);
       if (command) process.exitCode = 1;

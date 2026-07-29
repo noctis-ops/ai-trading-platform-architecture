@@ -22,6 +22,10 @@ import {
   analyseZones,
 } from "./analysers";
 import { analyseStructure, clamp } from "./structure";
+import { getRegimeWeights } from "./weights";
+import { analyseReversal } from "./reversal";
+import { analyseVwap, analyseVolumeProfile, analyseOrderFlow } from "./orderflow";
+import { analyseBreakout } from "./breakout";
 import {
   DEFAULT_BRAIN_CONFIG,
   type AnalyserReport,
@@ -56,7 +60,7 @@ const round2 = (v: number) => Math.round(v * 100) / 100;
 
 export function analyseTimeframe(candles: Candle[], timeframe: Timeframe, config: BrainConfig): TimeframeAnalysis {
   const structure = analyseStructure(candles);
-  const reports: Record<string, AnalyserReport> = {
+  const baseReports: Record<string, AnalyserReport> = {
     trend: analyseTrend(candles),
     structure,
     zones: analyseZones(candles, structure.zones),
@@ -65,9 +69,21 @@ export function analyseTimeframe(candles: Candle[], timeframe: Timeframe, config
     volatility: analyseVolatility(candles),
     priceAction: analysePriceAction(candles),
     liquidity: analyseLiquidity(candles),
+    // v3.0 — Order Flow & multi-strategy analysers
+    vwap: analyseVwap(candles),
+    volumeProfile: analyseVolumeProfile(candles),
+    orderFlow: analyseOrderFlow(candles),
+    reversal: analyseReversal(candles, structure.zones),
+    breakout: analyseBreakout(candles),
   };
 
-  const score = weightedScore(reports, config.weights);
+  const reports = { ...baseReports };
+
+  // Use adaptive weights based on the detected regime
+  const regime = classifyRegime(baseReports);
+  const regimeWeights = getRegimeWeights(regime);
+
+  const score = weightedScore(reports, regimeWeights);
   const bias: Bias = score > 0.15 ? "long" : score < -0.15 ? "short" : "neutral";
 
   return {
@@ -320,7 +336,8 @@ export function estimateProbability(confluence: number, alignment: number, regim
   // Regime adjustment: trends are kinder to trend-following entries.
   if (regime === "volatile_expansion") p -= 0.06;
   if (regime === "quiet_compression") p -= 0.08;
-  if (regime === "trending_up" || regime === "trending_down") p += 0.03;
+  // Symmetric boost for trending regimes (v3.0 fix: both get +0.06, not +0.03)
+  if (regime === "trending_up" || regime === "trending_down") p += 0.06;
   return clamp(p, 0.05, 0.92);
 }
 
@@ -429,8 +446,15 @@ export function decide(
     },
     {
       code: "REJECT_EXTREME_VOLATILITY",
-      failed: (vol.atrPct ?? 0) > config.maxAtrPct,
-      detail: { atrPct: vol.atrPct ?? 0, max: config.maxAtrPct },
+      // Asymmetric thresholds: shorts tolerate higher ATR because crypto
+      // crashes are faster/more volatile than rallies.
+      failed: direction === "short"
+        ? (vol.atrPct ?? 0) > (config.maxAtrPctShort ?? config.maxAtrPct * 1.33)
+        : (vol.atrPct ?? 0) > config.maxAtrPct,
+      detail: {
+        atrPct: vol.atrPct ?? 0,
+        max: direction === "short" ? (config.maxAtrPctShort ?? config.maxAtrPct * 1.33) : config.maxAtrPct,
+      },
       verdict: "reject",
     },
     {

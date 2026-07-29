@@ -478,3 +478,177 @@ export const watchedSymbols = pgTable("watched_symbols", {
   sortOrder: integer("sort_order").notNull().default(0),
   createdAt: createdAt(),
 });
+
+// ---------------------------------------------------------------------------
+// 6. Auto-trading
+// ---------------------------------------------------------------------------
+
+/**
+ * Trading accounts connect exchange API credentials.
+ * `customerId` is null for the owner's account — the system can trade the
+ * owner's capital while also allowing customers to connect their own exchange
+ * accounts for copy-trading or self-directed auto-trading.
+ *
+ * SECURITY: `apiKeyEncrypted` uses AES-256-GCM with a key derived from
+ * `TRADING_ENCRYPTION_KEY` (env). The secret is NEVER stored — only a hash
+ * for verification. Passphrase (OKX) is hashed as well.
+ */
+export const tradingAccounts = pgTable(
+  "trading_accounts",
+  {
+    id: id(),
+    customerId: uuid("customer_id").references(() => customers.id, { onDelete: "cascade" }),
+    /** Human-readable label, e.g. "Binance Futures Main". */
+    label: text("label").notNull(),
+    venue: text("venue").notNull(),
+    /** spot | futures */
+    marketType: text("market_type").notNull().default("futures"),
+    apiKeyEncrypted: text("api_key_encrypted").notNull(),
+    apiKeyIv: text("api_key_iv").notNull(),
+    secretHash: text("secret_hash").notNull(),
+    passphraseHash: text("passphrase_hash"),
+    /** Current snapshot values, refreshed by the sync job. */
+    equity: numeric("equity", { precision: 24, scale: 4 }).notNull().default("0"),
+    availableBalance: numeric("available_balance", { precision: 24, scale: 4 }).notNull().default("0"),
+    marginBalance: numeric("margin_balance", { precision: 24, scale: 4 }).notNull().default("0"),
+    unrealisedPnl: numeric("unrealised_pnl", { precision: 24, scale: 4 }).notNull().default("0"),
+    dailyPnl: numeric("daily_pnl", { precision: 24, scale: 4 }).notNull().default("0"),
+    dailyLoss: numeric("daily_loss", { precision: 24, scale: 4 }).notNull().default("0"),
+    peakEquity: numeric("peak_equity", { precision: 24, scale: 4 }).notNull().default("0"),
+    isActive: boolean("is_active").notNull().default(true),
+    lastSyncAt: timestamp("last_sync_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("trading_accounts_customer_idx").on(t.customerId),
+    index("trading_accounts_active_idx").on(t.isActive),
+  ],
+);
+
+/** Per-account trading configuration — the risk knobs. */
+export const tradingConfigs = pgTable("trading_configs", {
+  id: id(),
+  tradingAccountId: uuid("trading_account_id")
+    .notNull()
+    .unique()
+    .references(() => tradingAccounts.id, { onDelete: "cascade" }),
+  config: jsonb("config").notNull().default({}),
+  createdAt: createdAt(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * Every order sent to an exchange is recorded here.
+ * This is the immutable audit trail for every trade action.
+ */
+export const tradingOrders = pgTable(
+  "trading_orders",
+  {
+    id: id(),
+    tradingAccountId: uuid("trading_account_id")
+      .notNull()
+      .references(() => tradingAccounts.id, { onDelete: "cascade" }),
+    signalId: uuid("signal_id").references(() => signals.id, { onDelete: "set null" }),
+    exchangeOrderId: text("exchange_order_id"),
+    /** Unique client-generated ID for idempotency. */
+    clientOrderId: text("client_order_id").notNull(),
+    symbol: text("symbol").notNull(),
+    side: text("side").notNull(),
+    type: text("type").notNull(),
+    /** pending | open | partially_filled | filled | canceled | rejected | expired */
+    status: text("status").notNull().default("pending"),
+    price: numeric("price", { precision: 24, scale: 10 }),
+    quantity: numeric("quantity", { precision: 24, scale: 10 }).notNull(),
+    filledQuantity: numeric("filled_quantity", { precision: 24, scale: 10 }).notNull().default("0"),
+    avgFillPrice: numeric("avg_fill_price", { precision: 24, scale: 10 }),
+    filledQuoteValue: numeric("filled_quote_value", { precision: 24, scale: 4 }).notNull().default("0"),
+    fee: numeric("fee", { precision: 24, scale: 10 }).notNull().default("0"),
+    feeCurrency: text("fee_currency").notNull().default("USDT"),
+    reduceOnly: boolean("reduce_only").notNull().default(false),
+    timeInForce: text("time_in_force").notNull().default("GTC"),
+    error: text("error"),
+    rawResponse: jsonb("raw_response"),
+    filledAt: timestamp("filled_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("trading_orders_account_idx").on(t.tradingAccountId, t.createdAt),
+    uniqueIndex("trading_orders_client_idx").on(t.clientOrderId),
+  ],
+);
+
+/**
+ * Positions are derived from filled orders and exchange state.
+ * One position = one symbol + direction combination.
+ */
+export const tradingPositions = pgTable(
+  "trading_positions",
+  {
+    id: id(),
+    tradingAccountId: uuid("trading_account_id")
+      .notNull()
+      .references(() => tradingAccounts.id, { onDelete: "cascade" }),
+    signalId: uuid("signal_id").references(() => signals.id, { onDelete: "set null" }),
+    symbol: text("symbol").notNull(),
+    direction: text("direction").notNull(), // long | short
+    marketType: text("market_type").notNull().default("futures"),
+    /** open | closing | closed */
+    status: text("status").notNull().default("open"),
+    entryPrice: numeric("entry_price", { precision: 24, scale: 10 }).notNull(),
+    markPrice: numeric("mark_price", { precision: 24, scale: 10 }),
+    quantity: numeric("quantity", { precision: 24, scale: 10 }).notNull(),
+    notional: numeric("notional", { precision: 24, scale: 4 }).notNull(),
+    leverage: numeric("leverage", { precision: 8, scale: 2 }).notNull().default("1"),
+    marginUsed: numeric("margin_used", { precision: 24, scale: 4 }).notNull().default("0"),
+    unrealisedPnl: numeric("unrealised_pnl", { precision: 24, scale: 4 }).notNull().default("0"),
+    unrealisedPnlPct: numeric("unrealised_pnl_pct", { precision: 10, scale: 4 }).notNull().default("0"),
+    riskAmount: numeric("risk_amount", { precision: 24, scale: 4 }).notNull().default("0"),
+    riskPct: numeric("risk_pct", { precision: 8, scale: 4 }).notNull().default("0"),
+    stopLossPrice: numeric("stop_loss_price", { precision: 24, scale: 10 }),
+    takeProfit1Price: numeric("take_profit_1_price", { precision: 24, scale: 10 }),
+    takeProfit2Price: numeric("take_profit_2_price", { precision: 24, scale: 10 }),
+    stopMovedToBreakeven: boolean("stop_moved_to_breakeven").notNull().default(false),
+    trailingStopActive: boolean("trailing_stop_active").notNull().default(false),
+    trailingStopPrice: numeric("trailing_stop_price", { precision: 24, scale: 10 }),
+    mfeR: numeric("mfe_r", { precision: 8, scale: 3 }).notNull().default("0"),
+    maeR: numeric("mae_r", { precision: 8, scale: 3 }).notNull().default("0"),
+    closeReason: text("close_reason"),
+    realisedPnl: numeric("realised_pnl", { precision: 24, scale: 4 }).notNull().default("0"),
+    rMultiple: numeric("r_multiple", { precision: 8, scale: 3 }).notNull().default("0"),
+    openedAt: timestamp("opened_at", { withTimezone: true }).notNull().defaultNow(),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("trading_positions_account_idx").on(t.tradingAccountId, t.status),
+    index("trading_positions_symbol_idx").on(t.symbol, t.status),
+  ],
+);
+
+/**
+ * Immutable log of every risk-related event: gates passed/failed,
+ * limit breaches, emergency halts.
+ */
+export const riskEvents = pgTable(
+  "risk_events",
+  {
+    id: id(),
+    tradingAccountId: uuid("trading_account_id")
+      .notNull()
+      .references(() => tradingAccounts.id, { onDelete: "cascade" }),
+    signalId: uuid("signal_id").references(() => signals.id, { onDelete: "set null" }),
+    /** approved | rejected | limit_breach | emergency_halt | daily_reset */
+    eventType: text("event_type").notNull(),
+    reason: text("reason"),
+    /** Full risk check breakdown for forensics. */
+    checks: jsonb("checks").notNull().default([]),
+    metadata: jsonb("metadata").notNull().default({}),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("risk_events_account_idx").on(t.tradingAccountId, t.createdAt),
+  ],
+);

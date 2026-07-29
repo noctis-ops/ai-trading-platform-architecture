@@ -1,0 +1,32 @@
+# Docker Compose for Private Trading Assistant
+#
+# Quick start:
+#   docker-compose up -d
+#   cp .env.example .env
+#   # Edit .env with DATABASE_URL=postgresql://trading:trading@localhost:5432/trading_assistant
+#   npm install && npm run db:migrate && npm run admin seed
+#
+# OR use the built-in setup script:
+#   bash scripts/setup-dev.sh
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: trading-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: trading
+      POSTGRES_PASSWORD: trading
+      POSTGRES_DB: trading_assistant
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading -d trading_assistant"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

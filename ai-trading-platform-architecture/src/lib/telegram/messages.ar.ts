@@ -89,6 +89,41 @@ const REASON_AR: Record<ReasonCode, (d: Detail) => string> = {
     d?.stopAtrMultiple
       ? `السعر ابتعد كثيراً عن مستوى الإبطال (${d.stopAtrMultiple}× ATR) — ننتظر ارتداداً لدخول أفضل`
       : "في انتظار سعر أفضل للدخول",
+
+  // v3.0 — Order Flow
+  VWAP_BULLISH: () => "السعر فوق VWAP — ضغط شرائي مؤسسي",
+  VWAP_BEARISH: () => "السعر تحت VWAP — ضغط بيعي مؤسسي",
+  VWAP_CROSSOVER_UP: () => "اختراق السعر لـ VWAP للأعلى",
+  VWAP_CROSSOVER_DOWN: () => "كسر السعر لـ VWAP للأسفل",
+  VP_POC_SUPPORT: (d) => `نقطة التحكم (POC) عند ${d?.poc ?? "—"} تعمل كدعم`,
+  VP_POC_RESISTANCE: (d) => `نقطة التحكم (POC) عند ${d?.poc ?? "—"} تعمل كمقاومة`,
+  VP_VALUE_AREA_BREAKOUT: () => "اختراق منطقة القيمة — حركة مدعومة بحجم",
+  CVD_BULLISH: () => "تراكم دلتا الحجم إيجابي — شراء متراكم",
+  CVD_BEARISH: () => "تراكم دلتا الحجم سلبي — بيع متراكم",
+  CVD_DIVERGENCE_BEAR: () => "دايفرجنس في دلتا الحجم — توزيع خفي",
+
+  // v3.0 — Reversal
+  REVERSAL_HAMMER: () => "شمعة مطرقة ارتدادية — رفض واضح للهبوط",
+  REVERSAL_SHOOTING_STAR: () => "شمعة نجمة هابطة — رفض واضح للصعود",
+  REVERSAL_DIVERGENCE_BULL: () => "دايفرجنس إيجابي — ارتداد محتمل",
+  REVERSAL_DIVERGENCE_BEAR: () => "دايفرجنس سلبي — انعكاس محتمل",
+  REVERSAL_OVERSOLD: (d) => `تشبع بيعي (RSI ${d?.rsi ?? "—"}) — ارتداد متوقع`,
+  REVERSAL_OVERBOUGHT: (d) => `تشبع شرائي (RSI ${d?.rsi ?? "—"}) — تصحيح متوقع`,
+
+  // v3.0 — Breakout
+  BREAKOUT_SQUEEZE_UP: (d) => `انضغاط بولينجر (${d?.squeezeBars ?? 0} شمعة) — اختراق صاعد محتمل`,
+  BREAKOUT_SQUEEZE_DOWN: (d) => `انضغاط بولينجر (${d?.squeezeBars ?? 0} شمعة) — انهيار هابط محتمل`,
+  BREAKOUT_VOLUME_SURGE: (d) => `ارتفاع حاد في الحجم (${d?.ratio ?? "—"}×) يؤكد الاختراق`,
+
+  // v3.0 — On-Chain
+  ONCHAIN_FUNDING_BULLISH: () => "التمويل سالب — إشارة ارتداد إيجابية",
+  ONCHAIN_FUNDING_BEARISH: () => "التمويل مرتفع جداً — خطر تصفية",
+  ONCHAIN_OI_TRENDING: () => "العقود المفتوحة تدعم الاتجاه الحالي",
+  ONCHAIN_LS_EXTREME: () => "نسبة الشراء/البيع في تطرف — إشارة عكسية",
+
+  // v3.0 — New gate
+  REJECT_CORRELATION_OVERLAP: (d) =>
+    `ارتباط عالي مع ${d?.symbol ?? "عملة أخرى"} (${d?.correlation ?? "—"}) — تم تقليل الحجم`,
 };
 
 export function reasonAr(reason: Reason): string {
