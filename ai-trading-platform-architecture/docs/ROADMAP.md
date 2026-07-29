@@ -64,12 +64,12 @@ The critical path to a working paid service.
 
 ## Later — v3 (scale the business)
 
-- [ ] Automated payments (USDT confirmation and/or Stripe) via the existing
+- [x] Automated payments (USDT confirmation and/or Stripe) via the existing
       `provider` abstraction
-- [ ] Per-customer preferences: symbol filters, quiet hours, risk profile
+- [x] Per-customer preferences: symbol filters, quiet hours, risk profile
 - [ ] Economic calendar feed to make `REJECT_NEWS_WINDOW` real rather than
       a supplied flag
-- [ ] Referral / affiliate tracking
+- [x] Referral / affiliate tracking
 - [ ] A/B testing of engine versions via `analysis_snapshots.engineVersion`
 - [ ] Additional languages (one new `messages.*.ts` file)
 - [ ] Order-flow and open-interest analysers

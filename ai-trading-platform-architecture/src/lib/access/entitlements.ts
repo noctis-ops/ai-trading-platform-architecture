@@ -53,9 +53,18 @@ export const DEFAULT_FEATURES: PlanFeatures = {
   fullAnalysisBreakdown: false,
 };
 
+export type CustomerPreferences = {
+  quietHoursStart?: number;
+  quietHoursEnd?: number;
+  symbolFilters?: string[];
+  riskProfile?: "conservative" | "aggressive";
+};
+
 export type CustomerRecord = {
   id: string;
   status: "pending" | "active" | "suspended" | "banned";
+  languageCode?: string;
+  preferences?: CustomerPreferences;
 };
 
 export type SubscriptionRecord = {

@@ -21,6 +21,7 @@ import {
   type SubscriptionRecord,
 } from "@/lib/access/entitlements";
 import { signalClosedAr, signalOpenedAr } from "@/lib/telegram/messages.ar";
+import { signalClosedEn, signalOpenedEn } from "@/lib/telegram/messages.en";
 import { TelegramClient } from "@/lib/telegram/client";
 import type { Decision } from "../intelligence/types";
 import type { Notifier, StoredSignal } from "./signal-engine";
@@ -31,6 +32,7 @@ type Recipient = {
   planCode: string;
   features: PlanFeatures;
   prioritySeconds: number;
+  languageCode: string;
 };
 
 export class TelegramNotifier implements Notifier {
@@ -39,10 +41,16 @@ export class TelegramNotifier implements Notifier {
   async publishSignal(signalId: string, decision: Decision): Promise<void> {
     if (!decision.plan) return; // refusals are stored, not broadcast
 
-    const text = signalOpenedAr({ symbol: decision.symbol, plan: decision.plan, decision });
     const recipients = await this.entitledRecipients(decision.symbol);
 
-    await this.fanOut(recipients, text, "signal", signalId);
+    await this.fanOut(
+      recipients, 
+      (r) => r.languageCode === "en" 
+        ? signalOpenedEn({ symbol: decision.symbol, plan: decision.plan!, decision })
+        : signalOpenedAr({ symbol: decision.symbol, plan: decision.plan!, decision }), 
+      "signal", 
+      signalId
+    );
 
     await db
       .update(signals)
@@ -59,22 +67,36 @@ export class TelegramNotifier implements Notifier {
     const risk = Math.abs(signal.entryPrice - signal.stopLoss);
     const move = isLong ? exitPrice - signal.entryPrice : signal.entryPrice - exitPrice;
 
-    const text = signalClosedAr({
-      symbol: signal.symbol,
-      direction: signal.direction,
-      entry: signal.entryPrice,
-      exit: exitPrice,
-      pnlPct: (move / signal.entryPrice) * 100,
-      rMultiple: risk > 0 ? move / risk : 0,
-      outcome,
-      durationMinutes: (Date.now() - signal.openedAt) / 60_000,
-    });
-
     // Close notices go to everyone entitled to the symbol. A customer who
     // received the entry must receive the exit even if their plan changed —
     // leaving someone in a trade they were told to open is unacceptable.
     const recipients = await this.entitledRecipients(signal.symbol);
-    await this.fanOut(recipients, text, "close", signal.id);
+    await this.fanOut(
+      recipients, 
+      (r) => r.languageCode === "en"
+        ? signalClosedEn({
+            symbol: signal.symbol,
+            direction: signal.direction,
+            entry: signal.entryPrice,
+            exit: exitPrice,
+            pnlPct: (move / signal.entryPrice) * 100,
+            rMultiple: risk > 0 ? move / risk : 0,
+            outcome,
+            durationMinutes: (Date.now() - signal.openedAt) / 60_000,
+          })
+        : signalClosedAr({
+            symbol: signal.symbol,
+            direction: signal.direction,
+            entry: signal.entryPrice,
+            exit: exitPrice,
+            pnlPct: (move / signal.entryPrice) * 100,
+            rMultiple: risk > 0 ? move / risk : 0,
+            outcome,
+            durationMinutes: (Date.now() - signal.openedAt) / 60_000,
+          }), 
+      "close", 
+      signal.id
+    );
   }
 
   /**
@@ -90,6 +112,8 @@ export class TelegramNotifier implements Notifier {
         customerId: customers.id,
         chatId: customers.telegramId,
         customerStatus: customers.status,
+        preferences: customers.preferences,
+        languageCode: customers.languageCode,
         subId: subscriptions.id,
         subStatus: subscriptions.status,
         currentPeriodEnd: subscriptions.currentPeriodEnd,
@@ -117,6 +141,8 @@ export class TelegramNotifier implements Notifier {
       const customer: CustomerRecord = {
         id: row.customerId,
         status: row.customerStatus as CustomerRecord["status"],
+        languageCode: row.languageCode,
+        preferences: (row.preferences ?? {}) as CustomerRecord["preferences"],
       };
       const subscription: SubscriptionRecord = {
         id: row.subId,
@@ -133,6 +159,24 @@ export class TelegramNotifier implements Notifier {
       const limit = access.features.maxSymbols;
       const allowed = limit === -1 ? tierSymbols : tierSymbols.slice(0, limit);
       if (!allowed.includes(symbol)) continue;
+      
+      // Symbol Filters
+      if (customer.preferences?.symbolFilters && customer.preferences.symbolFilters.length > 0) {
+        if (!customer.preferences.symbolFilters.includes(symbol)) continue;
+      }
+
+      // Quiet Hours (UTC based)
+      if (customer.preferences?.quietHoursStart !== undefined && customer.preferences?.quietHoursEnd !== undefined) {
+        const hour = now.getUTCHours();
+        const start = customer.preferences.quietHoursStart;
+        const end = customer.preferences.quietHoursEnd;
+        if (start < end) {
+          if (hour >= start && hour < end) continue; // inside quiet window
+        } else {
+          // Wrap around midnight
+          if (hour >= start || hour < end) continue;
+        }
+      }
 
       out.push({
         customerId: access.customerId,
@@ -140,6 +184,7 @@ export class TelegramNotifier implements Notifier {
         planCode: access.planCode,
         features: access.features,
         prioritySeconds: access.features.prioritySeconds ?? 0,
+        languageCode: row.languageCode ?? "ar",
       });
     }
 
@@ -149,15 +194,21 @@ export class TelegramNotifier implements Notifier {
 
   private async fanOut(
     recipients: Recipient[],
-    text: string,
+    text: string | ((r: Recipient) => string),
     kind: "signal" | "close",
     signalId: string,
   ): Promise<void> {
-    for (const r of recipients) {
-      const result = await this.telegram.sendMessage(r.chatId, text);
+    const results = await this.telegram.broadcast(
+      recipients.map(r => ({ customerId: r.customerId, chatId: r.chatId })),
+      (customerId) => {
+        const r = recipients.find(x => x.customerId === customerId)!;
+        return typeof text === "function" ? text(r) : text;
+      }
+    );
 
+    for (const { customerId, result } of results) {
       await db.insert(deliveryLog).values({
-        customerId: r.customerId,
+        customerId,
         signalId,
         kind,
         status: result.ok ? "sent" : result.blockedByUser ? "blocked_by_user" : "failed",
@@ -167,10 +218,8 @@ export class TelegramNotifier implements Notifier {
         sentAt: result.ok ? new Date() : null,
       });
 
-      // A user who blocked the bot is a permanent state change, not a
-      // transient error: suspend them so the queue stops retrying forever.
       if (!result.ok && result.blockedByUser) {
-        await db.update(customers).set({ status: "suspended" }).where(eq(customers.id, r.customerId));
+        await db.update(customers).set({ status: "suspended" }).where(eq(customers.id, customerId));
       }
     }
   }
