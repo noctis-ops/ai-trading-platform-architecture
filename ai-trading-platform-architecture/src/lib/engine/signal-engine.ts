@@ -15,6 +15,7 @@
 import { decide, type DecisionContext } from "../intelligence/decision";
 import { DEFAULT_BRAIN_CONFIG, type BrainConfig, type Candle, type Decision, type Timeframe } from "../intelligence/types";
 import { validateCandles, type MarketDataRouter } from "../market/exchange";
+import type { AutoTrader } from "../trading/auto-trader";
 
 export const ENGINE_VERSION = process.env.ENGINE_VERSION ?? "2.2.0";
 
@@ -73,6 +74,8 @@ export type ScanResult = {
   symbol: string;
   decision: Decision | null;
   published: boolean;
+  /** Whether the auto-trader executed this decision. */
+  autoExecuted: boolean;
   error?: string;
 };
 
@@ -82,6 +85,7 @@ export class SignalEngine {
     private readonly store: SignalStore,
     private readonly notifier: Notifier,
     private readonly config: EngineConfig = DEFAULT_ENGINE_CONFIG,
+    private readonly autoTrader?: AutoTrader,
   ) {}
 
   /** One full pass over the watched universe. */
@@ -104,9 +108,34 @@ export class SignalEngine {
       const shouldPublish = decision.verdict === "enter" || this.config.publishRefusals;
       if (shouldPublish) await this.notifier.publishSignal(signalId, decision);
 
-      return { symbol, decision, published: shouldPublish };
+      // Auto-execute the trade if auto-trader is available
+      let autoExecuted = false;
+      if (this.autoTrader && decision.verdict === "enter" && decision.plan) {
+        const result = await this.autoTrader.onDecision(decision);
+        autoExecuted = result.executed;
+        // Link the signal to the position
+        if (result.executed && result.positionId) {
+          // Store the positionId in signal metadata
+          await this.store.updateSignal(signalId, {
+            id: signalId,
+            symbol,
+            direction: decision.direction ?? "long",
+            entryPrice: decision.plan.entry,
+            stopLoss: decision.plan.stopLoss,
+            takeProfit1: decision.plan.takeProfit1,
+            takeProfit2: decision.plan.takeProfit2,
+            status: "open",
+            openedAt: Date.now(),
+            stopMovedToBreakeven: false,
+            mfeR: 0,
+            maeR: 0,
+          });
+        }
+      }
+
+      return { symbol, decision, published: shouldPublish, autoExecuted };
     } catch (err) {
-      return { symbol, decision: null, published: false, error: (err as Error).message };
+      return { symbol, decision: null, published: false, autoExecuted: false, error: (err as Error).message };
     }
   }
 
@@ -160,6 +189,11 @@ export class SignalEngine {
       }
       await this.evaluateSignal(signal, ticker.price);
     }
+
+    // Also sync auto-trader positions
+    if (this.autoTrader) {
+      await this.autoTrader.trackPositions();
+    }
   }
 
   private async evaluateSignal(signal: StoredSignal, price: number): Promise<void> {
@@ -185,6 +219,11 @@ export class SignalEngine {
       });
       await this.store.recordEvent(signal.id, outcome === "breakeven" ? "stop_moved_be" : "stop_hit", price);
       await this.notifier.publishClose(signal, price, outcome);
+
+      // Notify auto-trader of the close
+      if (this.autoTrader) {
+        await this.autoTrader.onSignalClose(signal.symbol, signal.direction, price, outcome, signal.id);
+      }
       return;
     }
 
@@ -192,6 +231,10 @@ export class SignalEngine {
       await this.store.updateSignal(signal.id, { status: "tp2_hit", mfeR, maeR });
       await this.store.recordEvent(signal.id, "tp2_hit", price);
       await this.notifier.publishClose(signal, price, "tp2");
+
+      if (this.autoTrader) {
+        await this.autoTrader.onSignalClose(signal.symbol, signal.direction, price, "tp2", signal.id);
+      }
       return;
     }
 
@@ -200,6 +243,10 @@ export class SignalEngine {
       await this.store.updateSignal(signal.id, { status: "tp1_hit", stopMovedToBreakeven: true, mfeR, maeR });
       await this.store.recordEvent(signal.id, "tp1_hit", price, { stopMovedTo: signal.entryPrice });
       await this.notifier.publishClose(signal, price, "tp1");
+
+      if (this.autoTrader) {
+        await this.autoTrader.onSignalClose(signal.symbol, signal.direction, price, "tp1", signal.id);
+      }
       return;
     }
 

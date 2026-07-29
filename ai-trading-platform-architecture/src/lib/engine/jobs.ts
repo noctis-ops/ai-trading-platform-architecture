@@ -10,7 +10,7 @@ import { db } from "@/db";
 import { calibration, customers, deliveryLog, plans, signalOutcomes, signals, subscriptions, economicEvents } from "@/db/schema";
 import { calibrateAll, deriveLessons } from "../intelligence/learning";
 import { subscriptionExpiringSoonAr } from "../telegram/messages.ar";
-import { getSignalEngine, getTelegramClient } from "./container";
+import { getAutoTrader, getSignalEngine, getTelegramClient } from "./container";
 import { buildReport, loadOutcomes, type Period } from "./reporting";
 
 export type JobResult = { job: string; ok: boolean; details: Record<string, unknown> };
@@ -205,4 +205,36 @@ export async function runCalendarJob(): Promise<JobResult> {
   await db.delete(economicEvents).where(lt(economicEvents.eventTime, cutoff));
   
   return { job: "calendar", ok: true, details: { "cleanedOldEvents": true } };
+}
+
+/** Sync auto-trader account info from exchange and reset daily PnL at midnight. */
+export async function runTradingSyncJob(): Promise<JobResult> {
+  const trader = getAutoTrader();
+  const state = trader.getState();
+
+  if (state.mode === "off") {
+    return { job: "trading_sync", ok: true, details: { mode: "off" } };
+  }
+
+  await trader.syncAccount();
+
+  // Reset daily PnL at UTC midnight
+  const now = new Date();
+  if (now.getUTCHours() === 0 && now.getUTCMinutes() < 5) {
+    trader.resetDaily();
+  }
+
+  const newState = trader.getState();
+  return {
+    job: "trading_sync",
+    ok: true,
+    details: {
+      mode: newState.mode,
+      equity: newState.equity,
+      dailyPnl: newState.dailyPnl,
+      openPositions: newState.openPositions.length,
+      isHalted: newState.isHalted,
+      haltReason: newState.haltReason,
+    },
+  };
 }

@@ -81,6 +81,33 @@ export type ReasonCode =
   | "MTF_ALIGNED"
   | "MTF_PARTIAL"
   | "MTF_CONFLICT"
+  // v3.0 — Order Flow
+  | "VWAP_BULLISH"
+  | "VWAP_BEARISH"
+  | "VWAP_CROSSOVER_UP"
+  | "VWAP_CROSSOVER_DOWN"
+  | "VP_POC_SUPPORT"
+  | "VP_POC_RESISTANCE"
+  | "VP_VALUE_AREA_BREAKOUT"
+  | "CVD_BULLISH"
+  | "CVD_BEARISH"
+  | "CVD_DIVERGENCE_BEAR"
+  // v3.0 — Reversal
+  | "REVERSAL_HAMMER"
+  | "REVERSAL_SHOOTING_STAR"
+  | "REVERSAL_DIVERGENCE_BULL"
+  | "REVERSAL_DIVERGENCE_BEAR"
+  | "REVERSAL_OVERSOLD"
+  | "REVERSAL_OVERBOUGHT"
+  // v3.0 — Breakout
+  | "BREAKOUT_SQUEEZE_UP"
+  | "BREAKOUT_SQUEEZE_DOWN"
+  | "BREAKOUT_VOLUME_SURGE"
+  // v3.0 — On-Chain
+  | "ONCHAIN_FUNDING_BULLISH"
+  | "ONCHAIN_FUNDING_BEARISH"
+  | "ONCHAIN_OI_TRENDING"
+  | "ONCHAIN_LS_EXTREME"
   // Decision gates (rejections)
   | "REJECT_LOW_CONFLUENCE"
   | "REJECT_MTF_CONFLICT"
@@ -94,6 +121,7 @@ export type ReasonCode =
   | "REJECT_COOLDOWN"
   | "REJECT_DAILY_LIMIT"
   | "REJECT_EXPOSURE_LIMIT"
+  | "REJECT_CORRELATION_OVERLAP"
   | "WAIT_BETTER_PRICE";
 
 export type Reason = {
@@ -204,8 +232,10 @@ export type BrainConfig = {
   minProbability: number;
   /** Minimum reward-to-risk on TP1 required to enter. */
   minRiskReward: number;
-  /** Max ATR% of price before the market is considered untradeable. */
+  /** Max ATR% of price before the market is considered untradeable (long). */
   maxAtrPct: number;
+  /** Max ATR% for shorts — higher because crypto crashes are faster. */
+  maxAtrPctShort: number;
   /** Min ATR% of price before the market is considered dead. */
   minAtrPct: number;
   /** Weight of each analyser inside the confluence score. */
@@ -238,6 +268,7 @@ export const DEFAULT_BRAIN_CONFIG: BrainConfig = {
   minProbability: 0.55,
   minRiskReward: 1.8,
   maxAtrPct: 6,
+  maxAtrPctShort: 8,   // Shorts tolerate 33% more volatility (crypto crashes are faster)
   minAtrPct: 0.15,
   weights: {
     trend: 1.6,
@@ -248,6 +279,11 @@ export const DEFAULT_BRAIN_CONFIG: BrainConfig = {
     volatility: 0.6,
     priceAction: 1.1,
     liquidity: 1.0,
+    vwap: 0.8,
+    volumeProfile: 0.7,
+    orderFlow: 0.6,
+    reversal: 0.0,
+    breakout: 0.0,
   },
   baseRiskPct: 1,
   maxRiskPct: 2,
