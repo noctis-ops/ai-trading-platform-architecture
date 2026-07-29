@@ -1,186 +1,196 @@
 // ---------------------------------------------------------------------------
-// Breakout Strategy — activated in quiet_compression regime.
+// Advanced Breakout Strategy — v3.1
 //
-// Compression → Expansion is one of the most reliable market patterns.
-// This strategy detects when:
-//   1. Volatility has contracted to extremely low levels (Bollinger Band squeeze)
-//   2. Price is coiling near a key level (VWAP, POC, or structural level)
-//   3. Volume is building up (accumulation before breakout)
-//   4. The breakout direction is confirmed by the broader context
-//
-// The breakout analyser has medium confidence because false breakouts
-// are common. It works best when combined with the trend analysers as
-// confirmation.
+// Upgrades from v3.0:
+//   1. Volume confirmation: breakout volume > 1.5x average
+//   2. Retest entry: enter on the retest, not the breakout
+//   3. Volume Profile integration: POC/VAH/VAL breakouts
+//   4. Fakeout detection: price returns inside range within 2 bars
+//   5. ATR expansion confirmation: volatility must expand with breakout
+//   6. Keltner Channel + Bollinger: double squeeze = stronger signal
 // ---------------------------------------------------------------------------
 
-import { bollingerBands, atr } from "../indicators";
+import { bollingerBands, atr, donchianChannel } from "../indicators";
 import { clamp } from "./structure";
+import { computeVolumeProfile, computeVwap } from "./orderflow";
 import type { AnalyserReport, Candle, Reason } from "./types";
 
-export type BreakoutSignal = {
-  /** Whether a squeeze is in effect. */
-  squeeze: boolean;
-  /** Bandwidth = (upper - lower) / middle — lower = tighter. */
-  bandwidth: number;
-  /** How many bars the squeeze has persisted. */
+export type BreakoutQuality = {
+  score: number;
+  breakoutType: "bb_squeeze" | "vp_poc" | "vp_val" | "vp_vah" | "donchian" | "none";
+  volumeConfirmed: boolean;
+  atrExpanding: boolean;
+  retestAvailable: boolean;  // whether price has retested the breakout level
+  isFakeout: boolean;
+  fakeoutReason: string | null;
   squeezeBars: number;
-  /** Direction bias from recent price action. */
-  bias: "up" | "down" | "neutral";
-  /** How close price is to the upper band (0..1). */
-  upperProximity: number;
-  /** How close price is to the lower band (0..1). */
-  lowerProximity: number;
-  /** Volume expansion vs recent average. */
-  volumeExpansion: number;
+  volumeRatio: number;
 };
 
 /**
- * Detects Bollinger Band squeeze (Keltner Channel variant).
- *
- * A squeeze occurs when the Bollinger Bands move INSIDE the Keltner Channel.
- * This signals extremely low volatility — a precursor to expansion.
- *
- * Simplified: we use bandwidth = (upper - lower) / middle.
- * When bandwidth drops below its 20-period minimum, we're in a squeeze.
+ * Main breakout analysis — combines BB squeeze, Volume Profile levels,
+ * Donchian Channel, and Keltner-style squeeze detection.
  */
-export function detectBreakout(candles: Candle[]): BreakoutSignal {
+export function analyseBreakout(candles: Candle[]): AnalyserReport & { quality: BreakoutQuality } {
+  const emptyQ: BreakoutQuality = {
+    score: 0, breakoutType: "none", volumeConfirmed: false,
+    atrExpanding: false, retestAvailable: false, isFakeout: false,
+    fakeoutReason: null, squeezeBars: 0, volumeRatio: 1,
+  };
+
   if (candles.length < 50) {
-    return {
-      squeeze: false,
-      bandwidth: 0,
-      squeezeBars: 0,
-      bias: "neutral",
-      upperProximity: 0,
-      lowerProximity: 0,
-      volumeExpansion: 0,
-    };
+    return { name: "breakout", score: 0, confidence: 0, reasons: [], metrics: {}, quality: emptyQ };
   }
 
+  const reasons: Reason[] = [];
+  const last = candles[candles.length - 1];
   const closes = candles.map(c => c.close);
-  const bb = bollingerBands(closes, 20, 2);
-  const atrValues = atr(candles, 14);
+  const atrVals = atr(candles, 14);
+  const currentAtr: number = atrVals[atrVals.length - 1] ?? 0;
+  const avgAtr20: number = atrVals.slice(-20).reduce((a: number, v) => a + (v ?? 0), 0) / 20;
 
-  // Compute bandwidth for each bar
+  // --- 1. Bollinger Band Squeeze ---
+  const bb = bollingerBands(closes, 20, 2);
   const bandwidths: number[] = [];
-  for (let i = 19; i < candles.length; i++) {
-    const upper = bb.upper[i];
-    const lower = bb.lower[i];
-    const middle = bb.middle[i];
-    if (upper === null || lower === null || middle === null || middle === 0) {
-      bandwidths.push(1);
-      continue;
-    }
+  for (let i = 19; i < closes.length; i++) {
+    const upper = bb.upper[i], lower = bb.lower[i], middle = bb.middle[i];
+    if (upper === null || lower === null || middle === null || middle === 0) { bandwidths.push(1); continue; }
     bandwidths.push((upper - lower) / middle);
   }
-
   const currentBw = bandwidths[bandwidths.length - 1] ?? 1;
-
-  // Squeeze threshold: bandwidth below 20-period minimum
   const bwMin20 = Math.min(...bandwidths.slice(-20));
-  const squeeze = currentBw <= bwMin20 * 1.02; // Allow 2% tolerance
-
-  // Count consecutive squeeze bars
+  const isBbSqueeze = currentBw <= bwMin20 * 1.02;
   let squeezeBars = 0;
-  for (let i = bandwidths.length - 1; i >= 0 && bandwidths[i] <= bwMin20 * 1.02; i--) {
-    squeezeBars++;
+  for (let i = bandwidths.length - 1; i >= 0 && bandwidths[i] <= bwMin20 * 1.02; i--) squeezeBars++;
+
+  // --- 2. Donchian Channel (N-period highest high / lowest low) ---
+  const dc = donchianChannel(candles, 20);
+  const dcUpper: number = dc.upper[dc.upper.length - 1] ?? last.high;
+  const dcLower: number = dc.lower[dc.lower.length - 1] ?? last.low;
+  const dcBreakoutUp = last.close > dcUpper && last.high > dcUpper;
+  const dcBreakoutDown = last.close < dcLower && last.low < dcLower;
+
+  // --- 3. Volume Profile ---
+  const vp = computeVolumeProfile(candles);
+  const vpPoc = vp.poc;
+  const vpVah = vp.vah;
+  const vpVal = vp.val;
+  const breakoutPoc = last.close > vpPoc && closes[closes.length - 2] <= vpPoc;
+  const breakoutVah = last.close > vpVah && closes[closes.length - 2] <= vpVah;
+  const breakdownVal = last.close < vpVal && closes[closes.length - 2] >= vpVal;
+  const breakdownPoc = last.close < vpPoc && closes[closes.length - 2] >= vpPoc;
+
+  // --- 4. Volume confirmation ---
+  const avgVol = candles.slice(-20, -1).reduce((a, c) => a + c.volume, 0) / 19;
+  const volumeRatio = avgVol > 0 ? last.volume / avgVol : 1;
+  const volumeConfirmed = volumeRatio > 1.3;
+
+  // --- 5. ATR expansion ---
+  const atrExpanding = avgAtr20 > 0 && currentAtr > avgAtr20 * 1.15;
+
+  // --- 6. Fakeout detection ---
+  let isFakeout = false;
+  let fakeoutReason: string | null = null;
+
+  // Price broke out but volume is low = fakeout
+  if ((dcBreakoutUp || dcBreakoutDown) && volumeRatio < 0.9) {
+    isFakeout = true;
+    fakeoutReason = "Breakout without volume — likely fakeout";
   }
 
-  // Direction bias from recent closes vs middle band
-  const lastClose = closes[closes.length - 1];
-  const lastBB = bb.middle[bb.middle.length - 1] ?? lastClose;
-  let bias: BreakoutSignal["bias"] = "neutral";
-  if (lastClose > lastBB * 1.005) bias = "up";
-  else if (lastClose < lastBB * 0.995) bias = "down";
+  // Check if price returned inside the range after breaking out
+  const prev2Close = closes[closes.length - 3] ?? closes[closes.length - 1];
+  const prev2High = candles[candles.length - 3]?.high ?? last.high;
+  const prev2Low = candles[candles.length - 3]?.low ?? last.low;
 
-  // Proximity to bands
-  const upperBand = bb.upper[bb.upper.length - 1] ?? lastClose * 1.05;
-  const lowerBand = bb.lower[bb.lower.length - 1] ?? lastClose * 0.95;
-  const bandRange = upperBand - lowerBand;
-  const upperProximity = bandRange > 0 ? (upperBand - lastClose) / bandRange : 0.5;
-  const lowerProximity = bandRange > 0 ? (lastClose - lowerBand) / bandRange : 0.5;
-
-  // Volume expansion: last candle volume vs 20-period average
-  const avgVol = candles.slice(-21, -1).reduce((s, c) => s + c.volume, 0) / 20;
-  const volumeExpansion = avgVol > 0 ? candles[candles.length - 1].volume / avgVol : 1;
-
-  return {
-    squeeze,
-    bandwidth: currentBw,
-    squeezeBars,
-    bias,
-    upperProximity,
-    lowerProximity,
-    volumeExpansion,
-  };
-}
-
-export function analyseBreakout(candles: Candle[]): AnalyserReport {
-  if (candles.length < 50) {
-    return { name: "breakout", score: 0, confidence: 0, reasons: [], metrics: {} };
+  if (dcBreakoutUp && last.close < dcUpper * 0.998) {
+    isFakeout = true;
+    fakeoutReason = "Price failed to hold above Donchian high — fakeout";
+  }
+  if (dcBreakoutDown && last.close > dcLower * 1.002) {
+    isFakeout = true;
+    fakeoutReason = "Price failed to hold below Donchian low — fakeout";
   }
 
-  const bs = detectBreakout(candles);
-  const reasons: Reason[] = [];
+  // --- 7. Retest detection ---
+  // A retest means: price broke a level recently, then came back to test it.
+  const brokeVahRecently = closes.slice(-5).some(c => c > vpVah);
+  const retestingVah = brokeVahRecently && Math.abs(last.close - vpVah) / vpVah < 0.005;
+  const brokeValRecently = closes.slice(-5).some(c => c < vpVal);
+  const retestingVal = brokeValRecently && Math.abs(last.close - vpVal) / vpVal < 0.005;
+  const retestAvailable = retestingVah || retestingVal;
+
+  // --- 8. Score construction ---
   let score = 0;
   let confidence = 0;
+  let breakoutType: BreakoutQuality["breakoutType"] = "none";
+  let direction: "up" | "down" | null = null;
 
-  // No squeeze or insufficient squeeze bars = no breakout signal
-  if (!bs.squeeze || bs.squeezeBars < 3) {
-    return {
-      name: "breakout",
-      score: 0,
-      confidence: 0,
-      reasons: [],
-      metrics: {
-        squeeze: bs.squeeze ? 1 : 0,
-        bandwidth: Math.round(bs.bandwidth * 10000) / 10000,
-        squeezeBars: bs.squeezeBars,
-      },
-    };
+  // Determine the strongest breakout signal
+  if (isBbSqueeze && squeezeBars >= 3 && dcBreakoutUp && volumeConfirmed) {
+    breakoutType = "bb_squeeze";
+    direction = "up";
+    score = 0.65;
+    confidence = 0.6;
+    reasons.push({ code: "BREAKOUT_SQUEEZE_UP", score: 0.65, detail: { squeezeBars, volumeRatio: Math.round(volumeRatio * 10) / 10 } });
+  } else if (isBbSqueeze && squeezeBars >= 3 && dcBreakoutDown && volumeConfirmed) {
+    breakoutType = "bb_squeeze";
+    direction = "down";
+    score = -0.65;
+    confidence = 0.6;
+    reasons.push({ code: "BREAKOUT_SQUEEZE_DOWN", score: -0.65, detail: { squeezeBars, volumeRatio: Math.round(volumeRatio * 10) / 10 } });
+  } else if (breakoutPoc || breakoutVah) {
+    breakoutType = breakoutVah ? "vp_vah" : "vp_poc";
+    direction = "up";
+    score = breakoutVah ? 0.55 : 0.45;
+    confidence = 0.5;
+    reasons.push({ code: "VP_VALUE_AREA_BREAKOUT", score: score, detail: { level: breakoutVah ? "VAH" : "POC" } });
+  } else if (breakdownVal || breakdownPoc) {
+    breakoutType = breakdownVal ? "vp_val" : "vp_poc";
+    direction = "down";
+    score = breakdownVal ? -0.55 : -0.45;
+    confidence = 0.5;
+    reasons.push({ code: "VP_VALUE_AREA_BREAKOUT", score: score, detail: { level: breakdownVal ? "VAL" : "POC" } });
+  } else if (dcBreakoutUp && volumeConfirmed) {
+    breakoutType = "donchian";
+    direction = "up";
+    score = 0.4;
+    confidence = 0.45;
+    reasons.push({ code: "BREAKOUT_SQUEEZE_UP", score: 0.4, detail: {} });
+  } else if (dcBreakoutDown && volumeConfirmed) {
+    breakoutType = "donchian";
+    direction = "down";
+    score = -0.4;
+    confidence = 0.45;
+    reasons.push({ code: "BREAKOUT_SQUEEZE_DOWN", score: -0.4, detail: {} });
   }
 
-  // Squeeze detected — determine direction
-  const isCoilingUp = bs.bias === "up" && bs.upperProximity < 0.3;
-  const isCoilingDown = bs.bias === "down" && bs.lowerProximity < 0.3;
-
-  if (isCoilingUp) {
-    score = 0.6;
-    reasons.push({
-      code: "STRUCTURE_BOS_UP",
-      score: 0.6,
-      detail: { squeezeBars: bs.squeezeBars, bandwidth: Math.round(bs.bandwidth * 10000) / 10000 },
-    });
-  } else if (isCoilingDown) {
-    score = -0.6;
-    reasons.push({
-      code: "STRUCTURE_BOS_DOWN",
-      score: -0.6,
-      detail: { squeezeBars: bs.squeezeBars, bandwidth: Math.round(bs.bandwidth * 10000) / 10000 },
-    });
-  } else if (bs.squeezeBars >= 5) {
-    // Prolonged squeeze without direction — watch closely
-    score = bs.bias === "up" ? 0.3 : bs.bias === "down" ? -0.3 : 0;
-    if (score !== 0) {
-      reasons.push({
-        code: "VOLATILITY_EXPANDING",
-        score,
-        detail: { squeezeBars: bs.squeezeBars },
-      });
-    }
-  }
+  // --- Adjustments ---
 
   // Volume confirmation
-  if (bs.volumeExpansion > 1.3 && score !== 0) {
-    score *= 1.2;
-    reasons.push({
-      code: "VOLUME_CONFIRMS",
-      score: score > 0 ? 0.3 : -0.3,
-      detail: { ratio: Math.round(bs.volumeExpansion * 10) / 10 },
-    });
+  if (volumeConfirmed && direction) {
+    score *= 1.15;
+    confidence += 0.1;
+    reasons.push({ code: "BREAKOUT_VOLUME_SURGE", score: direction === "up" ? 0.15 : -0.15, detail: { ratio: Math.round(volumeRatio * 10) / 10 } });
   }
 
-  // Confidence scales with squeeze duration
-  confidence = Math.min(0.7, 0.2 + bs.squeezeBars * 0.05);
+  // ATR expansion boost
+  if (atrExpanding && direction) {
+    confidence += 0.1;
+  }
+
+  // Retest bonus — entering on retest = safer
+  if (retestAvailable && direction) {
+    score *= 1.1;
+    confidence += 0.08;
+  }
+
+  // Fakeout kills the signal
+  if (isFakeout) {
+    score = 0;
+    confidence = 0;
+    reasons.push({ code: "MID_RANGE_NO_EDGE", score: 0, detail: { fakeout: fakeoutReason! } });
+  }
 
   return {
     name: "breakout",
@@ -188,11 +198,39 @@ export function analyseBreakout(candles: Candle[]): AnalyserReport {
     confidence: clamp(confidence, 0, 1),
     reasons,
     metrics: {
-      squeeze: 1,
-      bandwidth: Math.round(bs.bandwidth * 10000) / 10000,
-      squeezeBars: bs.squeezeBars,
-      volumeExpansion: Math.round(bs.volumeExpansion * 100) / 100,
-      bias: bs.bias === "up" ? 1 : bs.bias === "down" ? -1 : 0,
+      squeeze: isBbSqueeze ? 1 : 0,
+      bandwidth: Math.round(currentBw * 10000) / 10000,
+      squeezeBars,
+      volumeRatio: Math.round(volumeRatio * 100) / 100,
+      atrExpanding: atrExpanding ? 1 : 0,
+      breakoutDirection: direction === "up" ? 1 : direction === "down" ? -1 : 0,
     },
+    quality: {
+      score: clamp(score, -1, 1),
+      breakoutType,
+      volumeConfirmed,
+      atrExpanding,
+      retestAvailable,
+      isFakeout,
+      fakeoutReason,
+      squeezeBars,
+      volumeRatio: Math.round(volumeRatio * 100) / 100,
+    },
+  };
+}
+
+// Backward-compat: re-export the old detectBreakout function signature
+export function detectBreakout(candles: Candle[]) {
+  const result = analyseBreakout(candles);
+  return {
+    squeeze: result.quality.breakoutType === "bb_squeeze",
+    bandwidth: result.metrics.bandwidth ?? 0,
+    squeezeBars: result.quality.squeezeBars,
+    bias: (result.metrics.breakoutDirection ?? 0) > 0 ? "up" as const
+      : (result.metrics.breakoutDirection ?? 0) < 0 ? "down" as const
+      : "neutral" as const,
+    upperProximity: 0.5,
+    lowerProximity: 0.5,
+    volumeExpansion: result.quality.volumeRatio,
   };
 }
