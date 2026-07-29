@@ -221,6 +221,10 @@ export type Decision = {
   timeframes: TimeframeAnalysis[];
   symbol: string;
   generatedAt: number;
+  /** v3.1: which strategy produced this decision. */
+  strategy?: "trend" | "reversal" | "breakout";
+  /** v3.1: position size multiplier from central filter. */
+  filterMultiplier?: number;
 };
 
 export type BrainConfig = {
