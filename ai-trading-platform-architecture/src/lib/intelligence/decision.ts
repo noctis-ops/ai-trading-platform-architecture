@@ -26,6 +26,8 @@ import { getRegimeWeights } from "./weights";
 import { analyseReversal } from "./reversal";
 import { analyseVwap, analyseVolumeProfile, analyseOrderFlow } from "./orderflow";
 import { analyseBreakout } from "./breakout";
+import { scaledTargets } from "./trend-advanced";
+import { applySignalFilter, isHighLiquidityPeriod, type FilterContext } from "./signal-filter";
 import {
   DEFAULT_BRAIN_CONFIG,
   type AnalyserReport,
@@ -217,6 +219,7 @@ export function buildTradePlan(
   entryTf: TimeframeAnalysis,
   config: BrainConfig,
   qualityScore: number,
+  trendStrength?: number,
 ): PlanResult {
   const entry = entryTf.lastPrice;
   const atrValue = entryTf.atr;
@@ -283,8 +286,13 @@ export function buildTradePlan(
   const risk = Math.abs(entry - stopLoss);
   if (risk <= 0) return { ok: false, code: "INVALID_INPUTS", detail: { risk } };
 
-  const tp1 = direction === "long" ? entry + risk * TP1_R : entry - risk * TP1_R;
-  const tp2 = direction === "long" ? entry + risk * TP2_R : entry - risk * TP2_R;
+  // v3.2: Dynamic targets based on trend strength
+  const { tp1R, tp2R } = trendStrength !== undefined
+    ? scaledTargets(TP1_R, TP2_R, trendStrength)
+    : { tp1R: TP1_R, tp2R: TP2_R };
+
+  const tp1 = direction === "long" ? entry + risk * tp1R : entry - risk * tp1R;
+  const tp2 = direction === "long" ? entry + risk * tp2R : entry - risk * tp2R;
 
   const stopDistancePct = (risk / entry) * 100;
   // Risk scales with conviction but is hard-capped.
@@ -308,8 +316,8 @@ export function buildTradePlan(
       stopLoss,
       takeProfit1: tp1,
       takeProfit2: tp2,
-      riskReward1: TP1_R,
-      riskReward2: TP2_R,
+      riskReward1: tp1R,
+      riskReward2: tp2R,
       stopDistancePct,
       riskPerTradePct,
       positionSizePct,
@@ -404,7 +412,11 @@ export function decide(
   const objections = dedupeByCode(allReasons.filter((r) => (direction === "long" ? r.score < 0 : r.score > 0)));
 
   const qualityScore = clamp(confluence / 100, 0, 1);
-  const planResult = buildTradePlan(direction, entryTf, config, qualityScore);
+  // Extract trend strength for dynamic targets
+  const trendReport = entryTf.reports.trend;
+  const trendStrength = trendReport?.confidence ?? undefined;
+
+  const planResult = buildTradePlan(direction, entryTf, config, qualityScore, trendStrength);
   const plan = planResult.ok ? planResult.plan : null;
   const rawProbability = estimateProbability(confluence, alignment, regime);
   const probability = clamp(rawProbability * (ctx.calibration ?? 1), 0.05, 0.92);
@@ -503,6 +515,29 @@ export function decide(
     },
   ];
 
+  // --- Strategy detection ---
+  // Determine which strategy produced this signal
+  const strategy: Decision["strategy"] =
+    entryTf.reports.reversal && Math.abs(entryTf.reports.reversal.score) > 0.3 ? "reversal"
+    : entryTf.reports.breakout && Math.abs(entryTf.reports.breakout.score) > 0.3 ? "breakout"
+    : "trend";
+
+  // --- Central signal filter ---
+  const filterCtx: FilterContext = {
+    strategy,
+    regime,
+    confluence,
+    direction,
+    atrPct: vol.atrPct ?? 1,
+    historicalAtrPct: 1.5,
+    correlationFactor: 1,
+    consecutiveWins: 0,
+    consecutiveLosses: 0,
+    openPositions: ctx.hasOpenSignal ? 1 : 0,
+    isHighLiquidityPeriod: isHighLiquidityPeriod(),
+  };
+  const filterResult = applySignalFilter(filterCtx);
+
   const blocking = gates.find((g) => g.failed);
 
   if (blocking) {
@@ -520,6 +555,8 @@ export function decide(
       timeframes,
       symbol,
       generatedAt,
+      strategy,
+      filterMultiplier: filterResult.multiplier,
     };
   }
 
@@ -536,6 +573,8 @@ export function decide(
     timeframes,
     symbol,
     generatedAt,
+    strategy,
+    filterMultiplier: filterResult.multiplier,
   };
 }
 
@@ -568,5 +607,7 @@ function emptyDecision(
     timeframes: [],
     symbol,
     generatedAt,
+    strategy: "trend",
+    filterMultiplier: 1,
   };
 }
