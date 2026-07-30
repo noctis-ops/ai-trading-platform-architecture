@@ -212,3 +212,77 @@ export function signalClosedEn(args: {
     `Duration: ${Math.round(durationMinutes)} mins`,
   ].join("\n");
 }
+
+// v3.2: Locale system required exports
+export function helpText(): string {
+  return [
+    "📖 Help",
+    "━━━━━━━━━━━━━━━",
+    "/status — Market status",
+    "/analyze [pair] — Detailed analysis",
+    "/trades — Open positions",
+    "/performance — Performance summary",
+    "/daily — Daily report",
+    "/weekly — Weekly report",
+    "/monthly — Monthly report",
+    "/mysub — Subscription status",
+    "/plans — Plans and pricing",
+    "/settings — Alert preferences",
+    "/support — Contact support",
+    "/help — Show this menu",
+  ].join("\n");
+}
+
+export function notSubscribedText(): string {
+  return [
+    "👋 Welcome",
+    "━━━━━━━━━━━━━━━",
+    "This bot is for subscribers only.",
+    "To view plans: /plans",
+    "For support: /support",
+  ].join("\n");
+}
+
+export function subscriptionActiveText(plan: string, daysLeft: number, expiresAt: Date): string {
+  return [
+    "✅ Your subscription is active",
+    "━━━━━━━━━━━━━━━",
+    `Plan: ${plan}`,
+    `Remaining: ${daysLeft} days`,
+    `Expires: ${expiresAt.toISOString().slice(0, 10)}`,
+  ].join("\n");
+}
+
+export function subscriptionExpiredText(): string {
+  return [
+    "🔒 Your subscription has expired",
+    "━━━━━━━━━━━━━━━",
+    "You can no longer receive signals.",
+    "To renew: /renew",
+    "Or contact support.",
+  ].join("\n");
+}
+
+export function subscriptionExpiringText(daysLeft: number): string {
+  return [
+    "⏳ Your subscription is expiring soon",
+    "━━━━━━━━━━━━━━━",
+    `Only ${daysLeft} days remaining.`,
+    "Renew now — /renew",
+  ].join("\n");
+}
+
+export function performanceReportEn(s: any): string {
+  return [
+    `📊 Performance Report — ${s.periodLabel}`,
+    "━━━━━━━━━━━━━━━",
+    `Signals: ${s.totalSignals}`,
+    `Wins: ${s.wins}`,
+    `Losses: ${s.losses}`,
+    `Open: ${s.open}`,
+    "",
+    `Win Rate: ${s.winRatePct.toFixed(1)}%`,
+    `Avg Return: ${s.avgRMultiple >= 0 ? "+" : ""}${s.avgRMultiple.toFixed(2)}R`,
+    `Net: ${s.totalR >= 0 ? "+" : ""}${s.totalR.toFixed(2)}R`,
+  ].join("\n");
+}
