@@ -12,6 +12,9 @@ import { calibrateAll, deriveLessons } from "../intelligence/learning";
 import { subscriptionExpiringSoonAr } from "../telegram/messages.ar";
 import { getAutoTrader, getSignalEngine, getTelegramClient } from "./container";
 import { buildReport, loadOutcomes, type Period } from "./reporting";
+import { getMLPredictor, extractFeatures, type MLTrainingRow } from "../intelligence/ml-predictor";
+import { fetchFearGreed } from "../market/fear-greed";
+import { fetchDeribitOptions, analyseGammaSignal, gammaRiskMultiplier } from "../market/options-flow";
 
 export type JobResult = { job: string; ok: boolean; details: Record<string, unknown> };
 
@@ -205,6 +208,47 @@ export async function runCalendarJob(): Promise<JobResult> {
   await db.delete(economicEvents).where(lt(economicEvents.eventTime, cutoff));
   
   return { job: "calendar", ok: true, details: { "cleanedOldEvents": true } };
+}
+
+/** Train ML predictor on recent outcomes and cache fear-greed. */
+export async function runMLJob(): Promise<JobResult> {
+  const predictor = getMLPredictor();
+
+  // Load all outcomes for training
+  const outcomes = await loadOutcomes("all");
+  const rows: MLTrainingRow[] = outcomes.map(o => ({
+    confluence: o.confidence,
+    regimeTrend: 0, regimeStructure: 0, regimeZones: 0,
+    atrPct: 1, volatilityExpansion: 1, mtfAlignment: 0.6,
+    hasDivergence: false, hasVolumeConfirmation: false,
+    isReversal: false, isBreakout: false,
+    positionCount: 0, correlationOverlap: 0,
+    hourOfDay: 12, dayOfWeek: 3,
+    won: o.won,
+    rMultiple: o.rMultiple,
+  }));
+
+  predictor.train(rows);
+
+  // Fetch and cache fear-greed + gamma exposure for BTC
+  let fg = null;
+  let gammaSignal = null;
+  try { fg = await fetchFearGreed(); } catch { /* offline */ }
+  try {
+    const gex = await fetchDeribitOptions("BTCUSDT");
+    if (gex) gammaSignal = analyseGammaSignal(gex, 0);
+  } catch { /* offline */ }
+
+  return {
+    job: "ml",
+    ok: true,
+    details: {
+      trainingSamples: predictor.getSampleSize(),
+      predictorReady: predictor.isReady(),
+      fearGreed: fg?.value ?? null,
+      gammaBias: gammaSignal?.gammaBias ?? null,
+    },
+  };
 }
 
 /** Sync auto-trader account info from exchange and reset daily PnL at midnight. */
